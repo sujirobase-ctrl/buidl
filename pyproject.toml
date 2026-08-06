@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buidl"
+version = "0.1.0"
+description = "CLI downloader for media linked in XenForo forum threads (images, videos, files)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "isaac" }]
+keywords = ["xenforo", "forum", "downloader", "media", "simpcity"]
+dependencies = [
+    "requests>=2.32.0",
+    "beautifulsoup4>=4.12.0",
+    "rich>=13.7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/sujirobase-ctrl/buidl"
+
+[project.scripts]
+buidl = "downloader:main"
+buidl-batch = "main:main"
+
+[tool.setuptools]
+py-modules = ["downloader", "main"]
+packages = [
+    "src",
+    "src.downloaders",
+    "src.parsers",
+    "src.managers",
+]
+
+[tool.setuptools.package-data]
+src = ["py.typed"]
