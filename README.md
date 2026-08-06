@@ -1,4 +1,4 @@
-# ForumPostDownloader CLI
+# CLI
 
 Terminal port of [SkyCloudDev/ForumPostDownloader](https://github.com/SkyCloudDev/ForumPostDownloader)
 (a Tampermonkey userscript) with the interface and project layout of
