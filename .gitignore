@@ -1,0 +1,31 @@
+# Secrets / credentials — NEVER commit
+cookies.txt
+*.cookies
+
+# Downloaded content (runtime artifact, not source)
+Downloads/
+dist/Downloads/
+session.log
+simpcity.log
+.fpd_state.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+buidl.egg-info/
+
+# Build / packaging outputs
+dist/
+build/
+*.spec
+
+# Test cache
+.pytest_cache/
+tests/_tmp/
+
+# Misc local scratch
+Temp/
+_ref/
+CHATLOG.md
+URLs.txt
