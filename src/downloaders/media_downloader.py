@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,21 +10,20 @@ from pathlib import Path
 import requests
 
 from src.config import (
+    AUDIO_EXTENSIONS,
     CHUNK_SIZE,
     RATE_429_BACKOFF,
     RETRY_BACKOFF,
-    AUDIO_EXTENSIONS,
     VIDEO_EXTENSIONS,
     FailReason,
     SkipReason,
     TaskResult,
 )
-from src.error_summary import summarize_error
 from src.file_utils import (
-    ensure_unique_path,
     extension_from_content_type,
     sanitize_name,
 )
+
 from .chunked import (
     DownloadConfig,
     detect_range_support,
@@ -62,6 +62,9 @@ class MediaDownloader:
         self.dry_run = dry_run
         self.num_connections = max(1, num_connections)
         self.rate_limiter = rate_limiter
+        self._claim_lock = threading.Lock()
+        self._claimed_by_url: dict[str, Path] = {}
+        self._claimed_paths: set[Path] = set()
 
     def download(
         self,
@@ -101,7 +104,12 @@ class MediaDownloader:
         last_error = ""
         for attempt in range(self.max_retries + 1):
             try:
-                return self._attempt(media, folder, headers, task_index)
+                outcome = self._attempt(media, folder, headers, task_index)
+                if outcome.reason is not FailReason.NETWORK_ERROR:
+                    return outcome
+                last_error = outcome.message
+                if attempt < self.max_retries:
+                    time.sleep(RETRY_BACKOFF ** min(attempt, 4))
             except requests.HTTPError as error:
                 # 429 means the CDN is rate-limiting us by IP — back off harder
                 # than a generic network error so we don't extend the ban.
@@ -124,12 +132,6 @@ class MediaDownloader:
                     message=str(error),
                 )
 
-        self.live_manager.update_log(
-            event="Download failed",
-            details=(
-                f"{media.filename or media.url}: {summarize_error(last_error)}"
-            ),
-        )
         return DownloadOutcome(
             TaskResult.FAILED,
             FailReason.NETWORK_ERROR,
@@ -152,18 +154,23 @@ class MediaDownloader:
         # and is resilient to mid-file drops). Otherwise we fall through to the
         # single-stream path below, which opens a full GET.
         if self.num_connections > 1:
-            supports_range, content_length = detect_range_support(media.url, headers)
+            supports_range, content_length = detect_range_support(
+                media.url,
+                headers,
+                session=self.client.session,
+            )
             if should_use_parallel_download(
                 content_length, self.num_connections, supports_range=supports_range,
             ):
                 filename = sanitize_name(media.filename or "file")
                 target = folder / filename
-                if target.exists() and target.stat().st_size > 0:
+                claimed_by_other = self._is_claimed_by_other(media.url, target)
+                if not claimed_by_other and target.exists() and target.stat().st_size > 0:
                     return DownloadOutcome(
                         TaskResult.SKIPPED, SkipReason.ALREADY_DOWNLOADED, path=target,
                     )
-                target = ensure_unique_path(target)
-                task_id = self.live_manager.add_task(task_index, total=content_length or 100)
+                target = self._claim_target(media.url, target)
+                task_id = self.live_manager.add_task(task_index, total=100)
 
                 def _cb(pct: float) -> None:
                     self.live_manager.update_task(task_id, completed=pct)
@@ -177,6 +184,7 @@ class MediaDownloader:
                         num_connections=self.num_connections,
                         headers=headers,
                         rate_limiter=self.rate_limiter,
+                        session=self.client.session,
                     ),
                 )
                 if not failed:
@@ -219,7 +227,8 @@ class MediaDownloader:
             # reports a matching Content-Length. The only case we re-fetch is a
             # 0-byte stub left behind by an interrupted run, which we overwrite
             # in place rather than renaming to "name (1)".
-            if target.exists():
+            claimed_by_other = self._is_claimed_by_other(media.url, target)
+            if not claimed_by_other and target.exists():
                 existing = target.stat().st_size
                 if existing > 0:
                     return DownloadOutcome(
@@ -229,7 +238,7 @@ class MediaDownloader:
                     )
                 target.unlink()  # 0-byte stub -> overwrite
 
-            target = ensure_unique_path(target)
+            target = self._claim_target(media.url, target)
 
             # === Single-stream path (fallback) =============================
             # Resume an interrupted .part: if a previous attempt wrote bytes
@@ -248,11 +257,19 @@ class MediaDownloader:
                     stream=True,
                     timeout=timeout,
                 ) as resume_resp:
-                    if resume_resp.status_code in (206, 200):
+                    if resume_resp.status_code == 206:
                         return self._stream_to_file(
                             resume_resp, temp_path, resume_pos, task_index,
                         )
-                    # server refused the range; fall through to a fresh fetch
+                    if resume_resp.status_code == 200:
+                        # The host ignored Range and sent the whole file. Restart
+                        # instead of appending a full response to the partial file.
+                        temp_path.unlink(missing_ok=True)
+                        return self._stream_to_file(
+                            resume_resp, temp_path, 0, task_index,
+                        )
+                    # Server refused the range; fall through to the fresh GET
+                    # already opened above.
                     temp_path.unlink(missing_ok=True)
 
             return self._stream_to_file(response, temp_path, 0, task_index)
@@ -287,10 +304,42 @@ class MediaDownloader:
                 message=str(error),
             )
 
+        content_encoding = response.headers.get("Content-Encoding", "").lower()
+        if total and content_encoding in ("", "identity") and downloaded != total:
+            return DownloadOutcome(
+                TaskResult.FAILED,
+                FailReason.NETWORK_ERROR,
+                message=f"Incomplete response: expected {total} bytes, received {downloaded}",
+            )
+
         temp_path.replace(target_path := temp_path.with_name(
             temp_path.name[: -len(".part")] if temp_path.name.endswith(".part") else temp_path.name,
         ))
         return DownloadOutcome(TaskResult.COMPLETED, path=target_path)
+
+    def _claim_target(self, media_url: str, target: Path) -> Path:
+        """Reserve a collision-free output path for one URL across worker threads."""
+        with self._claim_lock:
+            claimed = self._claimed_by_url.get(media_url)
+            if claimed is not None:
+                return claimed
+
+            candidate = target
+            counter = 1
+            while candidate in self._claimed_paths or candidate.exists():
+                candidate = target.with_name(f"{target.stem} ({counter}){target.suffix}")
+                counter += 1
+
+            self._claimed_by_url[media_url] = candidate
+            self._claimed_paths.add(candidate)
+            return candidate
+
+    def _is_claimed_by_other(self, media_url: str, target: Path) -> bool:
+        with self._claim_lock:
+            return (
+                target in self._claimed_paths
+                and self._claimed_by_url.get(media_url) != target
+            )
 
     @staticmethod
     def _final_filename(media, response: requests.Response) -> str:  # noqa: ANN001

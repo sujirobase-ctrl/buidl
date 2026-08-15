@@ -4,11 +4,9 @@ traditional raster formats: jpg/jpeg/png/gif/bmp and friends, never webp).
 If a future edit re-adds webp to the accepted extensions or direct-link
 pattern, this test fails.
 """
-import sys
-sys.path.insert(0, r"C:\Users\isaac\Downloads\buidl")
-
 import re
-from src.config import DIRECT_LINK_PATTERN, IMAGE_EXTENSIONS, CONTENT_TYPE_EXTENSIONS
+
+from src.config import CONTENT_TYPE_EXTENSIONS, DIRECT_LINK_PATTERN, IMAGE_EXTENSIONS
 from src.parsers.host_parser import parse_hosts
 
 

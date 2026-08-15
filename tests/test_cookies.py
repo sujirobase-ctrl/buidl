@@ -21,7 +21,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-PROJECT = Path(r"C:\Users\isaac\Downloads\buidl")
+PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
 from bs4 import BeautifulSoup  # noqa: E402
@@ -121,10 +121,12 @@ def drive(answers: list[str], *, required: bool = False) -> tuple[str | None, st
 
 
 def wall(html: str) -> bool:
-    return looks_like_login_wall(BeautifulSoup(html, "lxml"))
+    return looks_like_login_wall(BeautifulSoup(html, "html.parser"))
 
 
 def main() -> int:
+    global passed, failed  # noqa: PLW0603
+    passed = failed = 0
     server = http.server.HTTPServer(("127.0.0.1", PORT), Gated)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     tmp = Path(tempfile.mkdtemp(prefix="hermes-verify-ck-"))
@@ -241,6 +243,10 @@ def main() -> int:
 
     print(f"\n{'=' * 52}\nad-hoc verification — passed {passed}, failed {failed}\n{'=' * 52}")
     return 1 if failed else 0
+
+
+def test_cookie_workflow() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

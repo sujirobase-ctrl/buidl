@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.config import FailReason, SkipReason, TaskResult, download_root
+from src.error_summary import summarize_error
 from src.file_utils import load_state, matches_any, sanitize_name, save_state
 from src.parsers import ParsedPost, ThreadParser, parse_hosts
 from src.resolvers import ResolvedMedia, resolve
-from .rate_limiter import RateLimiter
 
 from .media_downloader import MediaDownloader
+from .rate_limiter import RateLimiter
 
 LOGIN_WALL_MARKERS = (
     "you must be logged in",
@@ -47,6 +49,7 @@ class ThreadOptions:
     """Runtime options for a thread download."""
 
     custom_path: str | None = None
+    download_path: str | None = None
     max_pages: int = 1
     all_pages: bool = False
     post_ids: list[str] = field(default_factory=list)
@@ -61,6 +64,8 @@ class ThreadOptions:
     separate_posts: bool = False
     flat: bool = False
     clean_part: bool = False
+    cancel_event: threading.Event | None = None
+    pause_event: threading.Event | None = None
 
 
 class ThreadDownloader:
@@ -88,6 +93,9 @@ class ThreadDownloader:
     def download_thread(self, url: str) -> bool:
         """Download a whole thread. Returns True when something failed."""
         pages = self._collect_pages(url)
+        if self._cancelled():
+            self._log_cancelled()
+            return True
         if not pages:
             self.live_manager.update_log(
                 event="Empty thread",
@@ -96,10 +104,13 @@ class ThreadDownloader:
             return True
 
         title, posts = pages
-        root = download_root(self.options.custom_path) / sanitize_name(title)
+        root = self._download_root() / sanitize_name(title)
         state = load_state(root)
 
         media_plan = self._build_plan(posts, root)
+        if self._cancelled():
+            self._log_cancelled()
+            return True
         if not media_plan:
             self.live_manager.update_log(
                 event="Nothing to download",
@@ -114,8 +125,35 @@ class ThreadDownloader:
         )
 
         had_failure = self._run_downloads(media_plan, state, root)
+        if self._cancelled():
+            self._log_cancelled()
         self._report_leftover_parts(root)
-        return had_failure
+        return had_failure or self._cancelled()
+
+    def _cancelled(self) -> bool:
+        event = self.options.cancel_event
+        return bool(event and event.is_set())
+
+    def _download_root(self) -> Path:
+        """Return the exact media root requested by a GUI or the CLI default."""
+        if self.options.download_path:
+            return Path(self.options.download_path)
+        return download_root(self.options.custom_path)
+
+    def _wait_until_runnable(self) -> bool:
+        """Wait while paused and return False as soon as cancellation is requested."""
+        pause_event = self.options.pause_event
+        while pause_event is not None and not pause_event.is_set():
+            if self._cancelled():
+                return False
+            pause_event.wait(0.2)
+        return not self._cancelled()
+
+    def _log_cancelled(self) -> None:
+        self.live_manager.update_log(
+            event="Cancelled",
+            details="The operation was cancelled by the user.",
+        )
 
     def _report_leftover_parts(self, root: Path) -> None:
         """Warn about (and optionally delete) orphaned .part temp files.
@@ -169,6 +207,8 @@ class ThreadDownloader:
         pages_left = 10_000 if self.options.all_pages else max(self.options.max_pages, 1)
 
         while current and pages_left > 0:
+            if not self._wait_until_runnable():
+                break
             try:
                 response = self.client.get(current)
             except Exception as error:  # noqa: BLE001
@@ -249,6 +289,8 @@ class ThreadDownloader:
         ]
 
         for post in selected:
+            if not self._wait_until_runnable():
+                break
             matches = parse_hosts(post.html_content)
             if not matches:
                 continue
@@ -259,6 +301,8 @@ class ThreadDownloader:
                 destination = root / sanitize_name(post.label)
 
             for match in matches:
+                if not self._wait_until_runnable():
+                    break
                 resolved = resolve(match.url, self.client)
                 self.live_manager.update_log(
                     event="Resolved",
@@ -369,6 +413,38 @@ class ThreadDownloader:
             return False
         return True
 
+    @staticmethod
+    def _cached_file_is_complete(cached: object, root: Path) -> bool:
+        """Trust only state entries whose on-disk path and size still match."""
+        if cached == "completed":
+            # Legacy entries had no path/size to validate. Let MediaDownloader
+            # inspect the destination once, then upgrade the state entry.
+            return False
+        if not isinstance(cached, dict) or cached.get("status") != "completed":
+            return False
+
+        relative_path = cached.get("path")
+        expected_size = cached.get("size")
+        if not isinstance(relative_path, str) or not isinstance(expected_size, int):
+            return False
+
+        root_resolved = root.resolve()
+        candidate = (root / relative_path).resolve()
+        try:
+            candidate.relative_to(root_resolved)
+        except ValueError:
+            return False
+        return candidate.is_file() and candidate.stat().st_size == expected_size > 0
+
+    @staticmethod
+    def _completed_state(path: Path, root: Path) -> dict[str, object]:
+        """Build a verifiable, root-relative resume entry for a completed file."""
+        return {
+            "status": "completed",
+            "path": path.resolve().relative_to(root.resolve()).as_posix(),
+            "size": path.stat().st_size,
+        }
+
     def _run_downloads(
         self,
         plan: list[tuple[ResolvedMedia, Path]],
@@ -379,12 +455,22 @@ class ThreadDownloader:
         workers = max(1, self.options.workers)
 
         def job(index: int, media: ResolvedMedia, folder: Path):  # noqa: ANN202
+            if not self._wait_until_runnable():
+                return None
             # A small delay between file starts keeps rate-limiting CDNs
             # (filester, bunkr) happy when several workers run in parallel.
             if self.options.delay:
-                time.sleep(self.options.delay * ((index % max(1, workers)) + 1))
+                wait = self.options.delay * ((index % max(1, workers)) + 1)
+                cancel_event = self.options.cancel_event
+                if cancel_event is not None:
+                    if cancel_event.wait(wait):
+                        return None
+                else:
+                    time.sleep(wait)
+            if not self._wait_until_runnable():
+                return None
             cached = state.get(media.url)
-            if cached == "completed" and not self.options.dry_run:
+            if self._cached_file_is_complete(cached, root) and not self.options.dry_run:
                 self.live_manager.update_summary(
                     TaskResult.SKIPPED,
                     SkipReason.ALREADY_DOWNLOADED,
@@ -409,20 +495,54 @@ class ThreadDownloader:
                 except Exception as error:  # noqa: BLE001
                     had_failure = True
                     self.live_manager.update_summary(TaskResult.FAILED, FailReason.UNRESOLVED)
+                    message = summarize_error(str(error))
                     self.live_manager.update_log(
                         event="Unexpected error",
-                        details=f"{media.url}: {error}",
+                        details=(
+                            f"{media.filename or 'arquivo sem nome'} — {message}\n"
+                            f"URL: {media.url}"
+                        ),
                     )
+                    state[media.url] = {
+                        "status": "failed",
+                        "filename": media.filename or "",
+                        "reason": FailReason.UNRESOLVED.name,
+                        "message": message,
+                    }
                     continue
 
                 if outcome is None:
                     continue
 
                 self.live_manager.update_summary(outcome.result, outcome.reason)
-                state[media.url] = outcome.result.name.lower()
-
+                if (
+                    outcome.path
+                    and outcome.result in (TaskResult.COMPLETED, TaskResult.SKIPPED)
+                    and outcome.reason in (None, SkipReason.ALREADY_DOWNLOADED)
+                ):
+                    state[media.url] = self._completed_state(outcome.path, root)
                 if outcome.result is TaskResult.FAILED:
                     had_failure = True
+                    message = self._failure_message(outcome.reason, outcome.message)
+                    state[media.url] = {
+                        "status": "failed",
+                        "filename": media.filename or "",
+                        "reason": (
+                            outcome.reason.name
+                            if outcome.reason is not None
+                            else "UNKNOWN"
+                        ),
+                        "message": message,
+                    }
+                    self.live_manager.update_log(
+                        event="Download failed",
+                        details=(
+                            f"{media.filename or 'arquivo sem nome'} — {message}\n"
+                            f"URL: {media.url}"
+                        ),
+                    )
+                elif outcome.result is TaskResult.SKIPPED:
+                    state[media.url] = {"status": outcome.result.name.lower()}
                 elif outcome.result is TaskResult.COMPLETED and outcome.path:
                     self.live_manager.update_log(
                         event="Downloaded",
@@ -433,3 +553,16 @@ class ThreadDownloader:
             save_state(root, state)
 
         return had_failure
+
+    @staticmethod
+    def _failure_message(reason, raw_message: str) -> str:  # noqa: ANN001
+        """Return a useful Portuguese explanation for a failed media item."""
+        if reason is FailReason.WRITE_ERROR:
+            return f"erro ao gravar no disco: {raw_message or 'motivo desconhecido'}"
+        if reason is FailReason.UNRESOLVED:
+            return "não foi possível resolver o link do arquivo"
+        if reason in (FailReason.HTTP_ERROR, FailReason.NETWORK_ERROR):
+            return summarize_error(raw_message)
+        if raw_message:
+            return summarize_error(raw_message)
+        return "falha desconhecida"

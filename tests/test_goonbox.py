@@ -1,40 +1,59 @@
-"""Regression guard: goonbox.cr resolver + HOSTS entry (mirrors ForumPostDownloader).
+"""Offline contract tests for the goonbox resolver and host matcher."""
 
-Not the suite. Exercises the new _resolve_goodbox against the live API and the
-HOSTS matcher in parse_hosts. Mocks nothing (real HTTP + cookies).
-"""
-import sys
-sys.path.insert(0, r"C:\Users\isaac\Downloads\buidl")
+from __future__ import annotations
 
-from src.http_client import HttpClient
-from src.resolvers import resolve
 from src.parsers.host_parser import parse_hosts
+from src.resolvers import resolve
 
-res = []
-c = HttpClient(cookies_file=r"C:\Users\isaac\Downloads\cookies.txt")
-REAL = "aVhBYYe"  # confirmed live goonbox img id from the nene thread
 
-# HOSTS matcher
-html = f'<a href="https://goonbox.cr/img/{REAL}">x</a>'
-m = parse_hosts(html)
-assert any("goonbox.cr" in x.url for x in m), "goonbox.cr not matched"
-res.append("HOSTS: goonbox.cr/img/<id> detected by parse_hosts")
+class _Response:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
 
-# resolver -> real image url on cuckcapital.cr
-out = resolve(f"https://goonbox.cr/img/{REAL}", c)
-assert len(out) == 1, out
-assert ".jpg" in out[0].url or ".png" in out[0].url, out[0].url
-res.append(f"resolver: {out[0].filename} -> {out[0].url[:60]}...")
+    def json(self) -> dict:
+        return self.payload
 
-# album form
-out2 = resolve("https://goonbox.cr/a/someSlug", c)
-res.append(f"album form accepted (returns list, len={len(out2)})")
 
-# bad id -> [] (safe)
-assert resolve("https://goonbox.cr/img/zzz_nope", c) == []
-res.append("unknown id -> [] (no exception)")
+class _Session:
+    def get(self, url: str, **kwargs) -> _Response:
+        if "/api/images/good" in url:
+            return _Response(
+                {"image": {"original_url": "https://cdn.example/media/photo.jpg"}},
+            )
+        if "/api/albums/album/images" in url and kwargs.get("params") == {"page": 1}:
+            return _Response(
+                {
+                    "images": [
+                        {"original_url": "https://cdn.example/media/one.jpg"},
+                        {"original_url": "https://cdn.example/media/two.png"},
+                    ],
+                    "pagination": {"last_page": 1},
+                },
+            )
+        return _Response({})
 
-print("GOONBOX tests — passed:")
-for r in res:
-    print("  OK", r)
-print(f"({len(res)} checks)")
+
+class _Client:
+    timeout = 30
+    session = _Session()
+
+
+def test_goonbox_host_is_detected() -> None:
+    matches = parse_hosts('<a href="https://goonbox.cr/img/good">x</a>')
+    assert any("goonbox.cr" in match.url for match in matches)
+
+
+def test_goonbox_image_resolves_offline() -> None:
+    items = resolve("https://goonbox.cr/img/good", _Client())
+    assert len(items) == 1
+    assert items[0].filename == "photo.jpg"
+
+
+def test_goonbox_album_resolves_offline() -> None:
+    items = resolve("https://goonbox.cr/a/album", _Client())
+    assert {item.filename for item in items} == {"one.jpg", "two.png"}
+    assert all(item.subfolder == "goonbox_album" for item in items)
+
+
+def test_goonbox_unknown_image_is_safe() -> None:
+    assert resolve("https://goonbox.cr/img/missing", _Client()) == []

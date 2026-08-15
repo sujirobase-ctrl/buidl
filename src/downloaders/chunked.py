@@ -46,6 +46,7 @@ class DownloadConfig:
     num_connections: int
     headers: dict[str, str]
     rate_limiter: RateLimiter | None = None
+    session: requests.Session | None = None
 
 
 @dataclass
@@ -55,6 +56,7 @@ class ChunkInfo:
     headers: dict[str, str]
     on_progress: callable  # (n_bytes: int) -> None
     rate_limiter: RateLimiter | None = None
+    session: requests.Session | None = None
 
 
 @dataclass
@@ -67,10 +69,15 @@ class DownloadPlan:
     expected_sizes: list[int]
 
 
-def detect_range_support(url: str, headers: dict[str, str]) -> tuple[bool, int]:
+def detect_range_support(
+    url: str,
+    headers: dict[str, str],
+    session: requests.Session | None = None,
+) -> tuple[bool, int]:
     """HEAD the URL to learn whether it supports byte ranges and its size."""
     try:
-        response = requests.head(url, headers=headers, timeout=10)
+        requester = session or requests
+        response = requester.head(url, headers=headers, timeout=10)
         response.raise_for_status()
         supports_range = response.headers.get("Accept-Ranges", "").lower() == "bytes"
         content_length = int(response.headers.get("Content-Length", -1))
@@ -160,7 +167,8 @@ def _attempt_chunk_once(
     chunk_headers = {**chunk_info.headers, "Range": f"bytes={start_byte}-{end_byte}"}
     written = 0
     try:
-        with requests.get(
+        requester = chunk_info.session or requests
+        with requester.get(
             url,
             headers=chunk_headers,
             stream=True,
@@ -250,6 +258,7 @@ def download_chunks(
                     headers=config.headers,
                     on_progress=on_progress,
                     rate_limiter=config.rate_limiter,
+                    session=config.session,
                 ),
             ): path
             for byte_range, path in zip(plan.ranges, plan.chunk_paths)

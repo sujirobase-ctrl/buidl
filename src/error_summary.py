@@ -9,7 +9,6 @@ can tell at a glance *why* a file failed (timeout, DNS, 403, rate-limit, ...).
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
 
 # Known hosts get a friendlier explanation so the user knows who is at fault.
 _HOST_HINTS: dict[str, str] = {

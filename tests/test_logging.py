@@ -15,7 +15,6 @@ import shutil
 import sys
 import tempfile
 import threading
-from argparse import Namespace
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -143,6 +142,8 @@ def run_thread(tmp: Path, *, verbose: bool = False) -> Recorder:
 
 
 def main() -> int:
+    global passed, failed  # noqa: PLW0603
+    passed = failed = 0
     server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     tmp = Path(tempfile.mkdtemp(prefix="fpd-logging-"))
@@ -260,7 +261,6 @@ def main() -> int:
               str(healthy.names()))
 
         print("\n[CLI wiring]")
-        args = cli.parse_arguments.__wrapped__ if hasattr(cli.parse_arguments, "__wrapped__") else None
         sys.argv = ["downloader.py", f"{BASE}/threads/t.1/",
                     "--log-file", str(tmp / "cli.log"), "--verbose", "--dry-run"]
         parsed = cli.parse_arguments()
@@ -295,6 +295,26 @@ def main() -> int:
 
     print(f"\n{'=' * 46}\nlogging tests — passed {passed}, failed {failed}\n{'=' * 46}")
     return 1 if failed else 0
+
+
+def test_logging_workflow() -> None:
+    assert main() == 0
+
+
+def test_sensitive_query_parameters_are_redacted(tmp_path: Path) -> None:
+    log_file = tmp_path / "redacted.log"
+    table = LoggerTable(log_file=str(log_file), verbose=True)
+    table.log(
+        "Resolved",
+        "https://cdn.example/file.mp4?token=secret&ex=123&signature=private",
+        verbose_only=True,
+    )
+
+    content = log_file.read_text(encoding="utf-8")
+    assert "secret" not in content
+    assert "private" not in content
+    assert "token=%5BREDACTED%5D" in content
+    assert "ex=123" in content
 
 
 if __name__ == "__main__":

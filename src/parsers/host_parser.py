@@ -43,7 +43,7 @@ class HostMatch:
 def _build_pattern(fragment: str) -> re.Pattern[str]:
     """Wrap a host fragment into a full absolute-URL regex."""
     return re.compile(
-        rf"https?://(?:www\.)?{fragment}{URL_TAIL}",
+        rf"https?://(?:www\.)?(?:{fragment}){URL_TAIL}",
         re.IGNORECASE | re.DOTALL,
     )
 

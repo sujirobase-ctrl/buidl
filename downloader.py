@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from src import __version__
 from src.config import INTER_FILE_DELAY, MAX_RETRIES, MAX_WORKERS, SESSION_LOG
 from src.cookie_setup import forget_path, resolve_cookies
 from src.downloaders import ThreadDownloader, ThreadOptions
@@ -16,10 +17,43 @@ from src.http_client import HttpClient
 from src.managers import initialize_managers
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
+def nonnegative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
 def parse_arguments(common_only: bool = False) -> argparse.Namespace:
     """Build the CLI. `common_only` drops the positional URL (used by main.py)."""
     parser = argparse.ArgumentParser(
         description="Download media linked in forum posts (XenForo threads).",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
 
     if not common_only:
@@ -54,7 +88,7 @@ def parse_arguments(common_only: bool = False) -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-pages",
-        type=int,
+        type=positive_int,
         default=1,
         help="Number of pages to walk when --all-pages is not set (default: 1).",
     )
@@ -79,19 +113,19 @@ def parse_arguments(common_only: bool = False) -> argparse.Namespace:
     )
     parser.add_argument(
         "--workers",
-        type=int,
+        type=positive_int,
         default=MAX_WORKERS,
         help=f"Concurrent file downloads (default: {MAX_WORKERS}).",
     )
     parser.add_argument(
         "--max-retries",
-        type=int,
+        type=nonnegative_int,
         default=MAX_RETRIES,
         help=f"Retries per file (default: {MAX_RETRIES}).",
     )
     parser.add_argument(
         "--delay",
-        type=float,
+        type=nonnegative_float,
         default=INTER_FILE_DELAY,
         help=(
             "Seconds to wait before starting each file. CDNs like filester/"
@@ -101,7 +135,7 @@ def parse_arguments(common_only: bool = False) -> argparse.Namespace:
     )
     parser.add_argument(
         "--connections",
-        type=int,
+        type=positive_int,
         default=1,
         help=(
             "Parallel byte-range chunks per file (default: 1 = single stream). "
@@ -111,7 +145,7 @@ def parse_arguments(common_only: bool = False) -> argparse.Namespace:
     )
     parser.add_argument(
         "--rate-limit",
-        type=float,
+        type=positive_float,
         default=None,
         help=(
             "Aggregate bandwidth cap in MB/s shared across all downloads "

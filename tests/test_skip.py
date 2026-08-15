@@ -6,16 +6,12 @@ non-empty, and re-fetched when empty/partial.
 """
 from __future__ import annotations
 
-import sys
-import os
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from src.config import FailReason, SkipReason, TaskResult
 from src.downloaders.media_downloader import MediaDownloader
-from src.resolvers import ResolvedMedia
 from src.http_client import HttpClient
-from src.config import TaskResult, SkipReason
+from src.resolvers import ResolvedMedia
 
 
 class _FakeLive:
@@ -46,10 +42,9 @@ def _make_downloader():
     return MediaDownloader(client, live_manager=_FakeLive())
 
 
-def test_existing_nonempty_is_skipped():
+def test_existing_nonempty_is_skipped(tmp_path: Path):
     dl = _make_downloader()
-    d = Path(__file__).parent / "_tmp_skip"
-    d.mkdir(exist_ok=True)
+    d = tmp_path
     target = d / "song.mp3"
     # partial (not full) existing file must still be skipped on resume
     target.write_bytes(b"0123")
@@ -59,10 +54,9 @@ def test_existing_nonempty_is_skipped():
     target.unlink()
 
 
-def test_existing_empty_is_redownloaded():
+def test_existing_empty_is_redownloaded(tmp_path: Path):
     dl = _make_downloader()
-    d = Path(__file__).parent / "_tmp_skip"
-    d.mkdir(exist_ok=True)
+    d = tmp_path
     target = d / "song.mp3"
     target.write_bytes(b"")  # 0-byte stub from a killed run -> must re-fetch
     out = dl._attempt(ResolvedMedia(url="http://x/song.mp3", filename="song.mp3"), d, {}, 0)
@@ -71,16 +65,12 @@ def test_existing_empty_is_redownloaded():
     target.unlink()
 
 
-def test_resume_appends_to_partial_part():
+def test_resume_appends_to_partial_part(tmp_path: Path):
     """A .part left by a killed run should be resumed, not restarted."""
-    dl = _make_downloader()
-    d = Path(__file__).parent / "_tmp_skip"
-    d.mkdir(exist_ok=True)
+    d = tmp_path
     target = d / "song.mp3"
     part = target.with_suffix(target.suffix + ".part")
     part.write_bytes(b"0123")  # 4 of 10 bytes already downloaded
-
-    seen = {}
 
     class _FakeRespResume:
         def __enter__(self): return self
@@ -110,11 +100,56 @@ def test_resume_appends_to_partial_part():
     assert out.result is TaskResult.COMPLETED, out
     assert target.read_bytes() == b"0123456789", target.read_bytes()
     assert not part.exists(), "stale .part should be gone"
-    target.unlink()
 
 
-if __name__ == "__main__":
-    test_existing_nonempty_is_skipped()
-    test_existing_empty_is_redownloaded()
-    test_resume_appends_to_partial_part()
-    print("skip tests — passed 3, failed 0")
+def test_resume_restarts_when_server_ignores_range(tmp_path: Path):
+    """A 200 response to Range contains the whole file and must replace .part."""
+    target = tmp_path / "song.mp3"
+    part = target.with_suffix(target.suffix + ".part")
+    part.write_bytes(b"0123")
+
+    dl = _make_downloader()
+    out = dl._attempt(
+        ResolvedMedia(url="http://x/song.mp3", filename="song.mp3"),
+        tmp_path,
+        {},
+        0,
+    )
+
+    assert out.result is TaskResult.COMPLETED
+    assert target.read_bytes() == b"0123456789"
+
+
+def test_same_filename_from_different_urls_gets_unique_paths(tmp_path: Path):
+    dl = _make_downloader()
+    first = dl._claim_target("http://a/song.mp3", tmp_path / "song.mp3")
+    second = dl._claim_target("http://b/song.mp3", tmp_path / "song.mp3")
+
+    assert first.name == "song.mp3"
+    assert second.name == "song (1).mp3"
+
+
+def test_incomplete_response_is_retried_and_not_promoted(tmp_path: Path):
+    class _ShortResponse(_FakeResp):
+        def iter_content(self, chunk_size=1):
+            yield b"0123"
+
+    client = HttpClient()
+    calls = 0
+
+    def get(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return _ShortResponse()
+
+    client.session.get = get
+    downloader = MediaDownloader(client, live_manager=_FakeLive(), max_retries=1)
+    outcome = downloader.download(
+        ResolvedMedia(url="http://x/song.mp3", filename="song.mp3"),
+        tmp_path,
+    )
+
+    assert outcome.result is TaskResult.FAILED
+    assert outcome.reason is FailReason.NETWORK_ERROR
+    assert calls > 1
+    assert not (tmp_path / "Audio" / "song.mp3").exists()

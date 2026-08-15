@@ -1,10 +1,20 @@
-# CLI
+# ForumPostDownloader
 
+[![Test and build](https://github.com/sujirobase-ctrl/buidl/actions/workflows/build.yml/badge.svg)](https://github.com/sujirobase-ctrl/buidl/actions/workflows/build.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-The userscript's thread parser, host matcher table and per-host resolvers are
-reimplemented in Python; the live Rich UI — `Overall Progress` / `File Progress`
-panels plus a rolling `Log Messages` panel and a results summary — follows
-BunkrDownloader.
+Download images, videos, audio and archives linked from XenForo forum threads.
+The CLI walks paginated threads, resolves supported media hosts, resumes partial
+downloads and presents live progress without requiring a browser automation stack.
+
+Highlights:
+
+- modern Windows GUI with progress, logs, pause and safe cancellation;
+- resumable single-stream and parallel byte-range downloads;
+- cookies for login-gated forums;
+- batch mode, filters, rate limiting and dry runs;
+- offline parser/downloader tests for reliable releases.
 
 ```
 ┌────────── Overall Progress ──────────┐┌─────────── File Progress ───────────┐
@@ -18,18 +28,61 @@ BunkrDownloader.
 │                          Skipped  : 0                                       │
 │                          Failed   : 0                                       │
 └─────────────────────────────────────────────────────────────────────────────┘
-ForumPostDownloader CLI v1.0.0
+ForumPostDownloader CLI v0.1.0
 ```
 
 ## Install
 
+### Windows executable
+
+Download `buidl-gui.exe` (desktop interface) or `buidl.exe` (command line) from the
+[latest tested continuous release](https://github.com/sujirobase-ctrl/buidl/releases/tag/continuous),
+then double-click the GUI or run:
+
+```powershell
+.\buidl.exe --help
+```
+
+## Desktop interface
+
+Run from source with:
+
+```powershell
+.\.venv\Scripts\buidl-gui.exe
+# or: python gui.py
+```
+
+The GUI includes:
+
+- thread URL, cookies and destination pickers;
+- all-pages, per-post folders, flat layout and dry-run controls;
+- workers, retries, connection count, delay and bandwidth settings;
+- live overall progress, completed/skipped/failed counters and activity log;
+- a dedicated failure report with filename, reason, URL, copy and full-log actions;
+- cooperative pause and cancellation (partial files remain available for resume);
+- automatic validation of paths and numeric options before a run starts.
+
+The GUI destination picker selects the exact media directory. It defaults to
+`<project>/Downloads`; choosing `D:/My Media` writes each thread directly under
+`D:/My Media/<Thread Title>/`. The GUI log is written to `buidl-gui.log` in the
+selected directory. The CLI keeps its existing `--custom-path` behavior.
+
+### pipx
+
+```bash
+pipx install git+https://github.com/sujirobase-ctrl/buidl.git
+buidl --version
+```
+
+### From source
+
 ```bash
 python -m venv .venv
 .venv/Scripts/activate        # Windows;  source .venv/bin/activate on Linux/macOS
-pip install -r requirements.txt
+pip install .
 ```
 
-Requires Python 3.9+.
+Requires Python 3.10+.
 
 ## Single URL
 
@@ -221,17 +274,25 @@ All three suggest re-exporting cookies and retrying with `--reset-cookies`.
 ## Tests
 
 A local mock XenForo forum (`tests/mock_forum.py`) serves thread pages,
-pagination and real binaries, so the suite runs offline:
+pagination and deterministic binary fixtures, so the default suite runs offline:
 
 ```bash
-python -m tests.test_e2e      # 30 checks — parsing, downloads, filters, resume
-python tests/test_cookies.py  # 32 checks — cookies, 403/login walls, prompt
-python tests/test_logging.py  # 35 checks — --log-file, --verbose, stale session
+pip install ".[dev]"
+pytest -q
+ruff check .
 ```
 
-Covers parsing (title, posts, spoilers, quoted-link exclusion), byte-exact
-downloads, resume, `--include`/`--ignore`/`--separate-posts`, `--dry-run`,
-cookie handling and the session-health warnings.
+Build both Windows executables with:
+
+```powershell
+pyinstaller --clean --noconfirm buidl.spec
+pyinstaller --clean --noconfirm buidl-gui.spec
+```
+
+Covers parsing, byte-exact downloads, resume (including servers that ignore
+`Range`), filename collisions, filters, cookie handling, host resolvers, logging
+redaction and session-health warnings. CI runs it on Linux and Windows with
+Python 3.10–3.13 before producing release artifacts.
 
 ## Project layout
 
@@ -239,6 +300,7 @@ cookie handling and the session-health warnings.
 downloader.py              single-URL CLI
 main.py                    batch CLI (URLs.txt)
 src/
+├── __init__.py            package version
 ├── config.py              paths, colors, enums, HOSTS table
 ├── http_client.py         requests session w/ retries + cookies
 ├── file_utils.py          sanitising, state sidecar, filters
@@ -260,3 +322,6 @@ src/
 
 Only download content you have the right to access. Respect each site's terms of
 service and rate limits — `--workers` defaults to 3 deliberately.
+
+Signed query parameters such as download tokens and signatures are redacted from
+the persistent session log. The project is distributed under the [MIT License](LICENSE).

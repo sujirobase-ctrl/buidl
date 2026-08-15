@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime
-import sys
 import threading
 import time
 from contextlib import nullcontext

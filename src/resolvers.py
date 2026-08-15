@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlparse, urlencode
+from urllib.parse import urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -211,8 +211,6 @@ def _resolve_bunkr(url: str, client: HttpClient) -> list[ResolvedMedia]:
         return []
 
     kind, slug = match.group(2), match.group(3)
-    origin = f"https://bunkr{match.group(1)}"
-
     def _sign_one(file_id: str, folder: str) -> list[ResolvedMedia]:
         # Metadata API lives on dl.bunkr.cr regardless of which host served the
         # page (bunkr.cr / bunkr.ph both 404 on their own origin's /api/_001_v2).

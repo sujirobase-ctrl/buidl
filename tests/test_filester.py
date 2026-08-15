@@ -4,14 +4,7 @@ Mocks HttpClient so no network is touched; locks the SPA->API->CDN flow.
 """
 from __future__ import annotations
 
-import sys
-import os
-from urllib.parse import urlencode
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from src.resolvers import _resolve_filester
-
 
 FOLDER_HTML = """
 <html><body>
@@ -54,7 +47,7 @@ class _FakeClient:
 
     def get_soup(self, url):
         from bs4 import BeautifulSoup
-        return BeautifulSoup(FOLDER_HTML, "lxml")
+        return BeautifulSoup(FOLDER_HTML, "html.parser")
 
 
 def _api(file_id, name, server="https://fsc1.cdn.cr"):

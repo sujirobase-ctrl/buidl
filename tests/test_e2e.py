@@ -5,6 +5,7 @@ Run with:  python -m tests.test_e2e
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from argparse import Namespace
@@ -13,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from downloader import download_url  # noqa: E402
-from src.config import AUDIO_EXTENSIONS, TaskResult, VIDEO_EXTENSIONS  # noqa: E402
+from src.config import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, TaskResult  # noqa: E402
 from src.file_utils import sanitize_name  # noqa: E402
 from src.http_client import HttpClient  # noqa: E402
 from src.managers import initialize_managers  # noqa: E402
@@ -57,7 +58,7 @@ def base_args(**overrides) -> Namespace:  # noqa: ANN003
         include=[],
         workers=3,
         max_retries=1,
-        delay=2.0,
+        delay=0.0,
         connections=1,
         rate_limit=None,
         separate_posts=False,
@@ -70,7 +71,7 @@ def base_args(**overrides) -> Namespace:  # noqa: ANN003
     return args
 
 
-def test_sanitize() -> None:
+def check_sanitize() -> None:
     """Filename sanitising."""
     print("\n[sanitize_name]")
     check("strips emoji", sanitize_name("Hot \U0001f525 Pack") == "Hot Pack")
@@ -79,7 +80,7 @@ def test_sanitize() -> None:
     check("collapses spaces", sanitize_name("a    b") == "a b")
 
 
-def test_parser() -> None:
+def check_parser() -> None:
     """Thread parsing."""
     print("\n[ThreadParser]")
     client = HttpClient()
@@ -105,7 +106,7 @@ def test_parser() -> None:
     client.close()
 
 
-def test_download(tmp: Path) -> None:
+def check_download(tmp: Path) -> None:
     """Full download run."""
     print("\n[download]")
     shutil.rmtree(tmp, ignore_errors=True)
@@ -129,8 +130,22 @@ def test_download(tmp: Path) -> None:
             check(f"{name} size == {size}", path.stat().st_size == size,
                   f"got {path.stat().st_size}")
 
+    state = json.loads((folder / ".fpd_state.json").read_text(encoding="utf-8"))
+    entries = list(state.values())
+    check(
+        "resume state records path and size",
+        bool(entries)
+        and all(
+            entry.get("status") == "completed"
+            and isinstance(entry.get("path"), str)
+            and entry.get("size", 0) > 0
+            for entry in entries
+        ),
+        repr(entries),
+    )
 
-def test_resume(tmp: Path) -> None:
+
+def check_resume(tmp: Path) -> None:
     """Second run skips everything."""
     print("\n[resume]")
     manager = initialize_managers(disable_ui=True)
@@ -144,7 +159,7 @@ def test_resume(tmp: Path) -> None:
     check("all 6 skipped", skipped == 6, f"skipped={skipped}")
 
 
-def test_filters(tmp: Path) -> None:
+def check_filters(tmp: Path) -> None:
     """--include / --ignore / --separate-posts."""
     print("\n[filters]")
     include_dir = tmp / "inc"
@@ -166,7 +181,7 @@ def test_filters(tmp: Path) -> None:
     check("--ignore .mp4 excluded the video", not mp4s, f"got {mp4s}")
 
 
-def test_dry_run(tmp: Path) -> None:
+def check_dry_run(tmp: Path) -> None:
     """--dry-run writes nothing."""
     print("\n[dry-run]")
     dry_dir = tmp / "dry"
@@ -178,15 +193,17 @@ def test_dry_run(tmp: Path) -> None:
 
 def main() -> int:
     """Run the suite."""
+    global PASSED, FAILED  # noqa: PLW0603
+    PASSED = FAILED = 0
     server = serve()
     tmp = Path(__file__).resolve().parent / "_tmp"
     try:
-        test_sanitize()
-        test_parser()
-        test_download(tmp)
-        test_resume(tmp)
-        test_filters(tmp)
-        test_dry_run(tmp)
+        check_sanitize()
+        check_parser()
+        check_download(tmp)
+        check_resume(tmp)
+        check_filters(tmp)
+        check_dry_run(tmp)
     finally:
         server.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)
@@ -195,6 +212,10 @@ def main() -> int:
 
     print(f"\n{'=' * 40}\nPassed: {PASSED}   Failed: {FAILED}\n{'=' * 40}")
     return 1 if FAILED else 0
+
+
+def test_e2e_workflow() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

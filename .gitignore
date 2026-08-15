@@ -7,6 +7,7 @@ Downloads/
 dist/Downloads/
 session.log
 simpcity.log
+*.log
 .fpd_state.json
 
 # Python
@@ -19,6 +20,8 @@ buidl.egg-info/
 dist/
 build/
 *.spec
+!buidl.spec
+!buidl-gui.spec
 
 # Test cache
 .pytest_cache/

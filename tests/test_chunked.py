@@ -3,15 +3,11 @@
 No network: a fake HTTP range server is mocked so the byte-range partition,
 per-chunk resume and merge logic are exercised deterministically.
 """
-import sys
 from pathlib import Path
-
-sys.path.insert(0, r"C:\Users\isaac\Downloads\buidl")
 
 from src.downloaders.chunked import (
     DownloadConfig,
     compute_unit_ranges,
-    detect_range_support,
     save_file_with_chunks,
     should_use_parallel_download,
 )
@@ -106,8 +102,7 @@ def test_chunked_resume_skips_complete_units(tmp_path, monkeypatch):
     server = _FakeRangeServer(blob)
     _patch(server)
     # Pre-create one chunk file already correct so it is skipped on resume.
-    import json
-    from src.downloaders.chunked import _chunk_path, _plan_path, _load_or_create_plan
+    from src.downloaders.chunked import _chunk_path, _load_or_create_plan
     base = tmp_path / "out.bin"
     plan = _load_or_create_plan(base, len(blob), 4)
     first_path = _chunk_path(base, 0)

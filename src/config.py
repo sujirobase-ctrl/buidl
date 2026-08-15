@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
 
+from src import __version__
+
 # --- Paths -------------------------------------------------------------------
 
 URLS_FILE = "URLs.txt"
@@ -72,7 +74,7 @@ LOG_COLORS = {
 
 PROGRESS_COLUMNS_SEPARATOR = "[grey58]•"
 
-VERSION = "1.0.0"
+VERSION = __version__
 
 
 def get_version_string() -> str:
@@ -248,7 +250,7 @@ HOSTS: list[tuple[str, str, str, str | None]] = [
 # embedded in HTML attributes like <img src="...">.
 DIRECT_LINK_PATTERN = (
     r"https?://[^\s\"'<>]+?\."
-    r"(?:jpg|jpeg|png|gif|bmp|webp|mp4|webm|mkv|mov|m4v|avi|mp3|wav|ogg|m4a|flac|aac|opus|zip|rar|7z)"
+    r"(?:jpg|jpeg|png|gif|bmp|mp4|webm|mkv|mov|m4v|avi|mp3|wav|ogg|m4a|flac|aac|opus|zip|rar|7z)"
     r"(?=[\"'<>?\s]|$)"
 )
 

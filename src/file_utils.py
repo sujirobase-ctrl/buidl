@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from contextlib import suppress
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
 from src.config import (
     CONTENT_TYPE_EXTENSIONS,
@@ -33,6 +34,20 @@ EMOJI_PATTERN = re.compile(
     flags=re.UNICODE,
 )
 
+URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", flags=re.IGNORECASE)
+SENSITIVE_QUERY_KEYS = {
+    "access_token",
+    "auth",
+    "authorization",
+    "jwt",
+    "key",
+    "pass",
+    "password",
+    "sig",
+    "signature",
+    "token",
+}
+
 
 def sanitize_name(name: str, *, allow_emojis: bool = False) -> str:
     """Turn arbitrary text into a filesystem-safe folder/file name."""
@@ -58,6 +73,26 @@ def filename_from_url(url: str, fallback: str = "file") -> str:
     path = urlparse(url).path
     name = unquote(Path(path).name)
     return sanitize_name(name) if name else fallback
+
+
+def redact_url(url: str) -> str:
+    """Hide credentials commonly embedded in signed download URLs."""
+    try:
+        parts = urlsplit(url)
+        if not parts.query:
+            return url
+        query = [
+            (key, "[REDACTED]" if key.lower() in SENSITIVE_QUERY_KEYS else value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        ]
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    except ValueError:
+        return url
+
+
+def redact_sensitive_urls(text: str) -> str:
+    """Redact sensitive query parameters in every HTTP(S) URL in text."""
+    return URL_PATTERN.sub(lambda match: redact_url(match.group(0)), text)
 
 
 def extension_from_content_type(content_type: str | None) -> str:
@@ -104,21 +139,26 @@ def load_state(folder: Path) -> dict:
     if not state_file.exists():
         return {}
     try:
-        return json.loads(state_file.read_text(encoding="utf-8"))
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
     except (json.JSONDecodeError, OSError):
         return {}
 
 
 def save_state(folder: Path, state: dict) -> None:
-    """Persist the per-folder resume sidecar."""
+    """Persist the per-folder resume sidecar atomically."""
+    state_file = folder / STATE_FILENAME
+    temp_file = state_file.with_suffix(state_file.suffix + ".tmp")
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / STATE_FILENAME).write_text(
+        temp_file.write_text(
             json.dumps(state, indent=2),
             encoding="utf-8",
         )
+        temp_file.replace(state_file)
     except OSError:
-        pass
+        with suppress(OSError):
+            temp_file.unlink(missing_ok=True)
 
 
 def matches_any(patterns: list[str], filename: str) -> bool:
