@@ -1,8 +1,5 @@
 # CLI
 
-Terminal port of [SkyCloudDev/ForumPostDownloader](https://github.com/SkyCloudDev/ForumPostDownloader)
-(a Tampermonkey userscript) with the interface and project layout of
-[Lysagxra/BunkrDownloader](https://github.com/Lysagxra/BunkrDownloader).
 
 The userscript's thread parser, host matcher table and per-host resolvers are
 reimplemented in Python; the live Rich UI — `Overall Progress` / `File Progress`
