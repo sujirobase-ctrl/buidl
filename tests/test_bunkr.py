@@ -63,10 +63,10 @@ class _FakeClient:
         self.session = _FakeSession(by_id, sign_data)
         self.timeout = 30
     def get_soup(self, url):
-        if "/a/" in url: return BeautifulSoup(ALBUM_PAGE, "lxml")
-        if "/f/AAAA1111" in url: return BeautifulSoup(FILE_A, "lxml")
-        if "/f/BBBB2222" in url: return BeautifulSoup(FILE_B, "lxml")
-        return BeautifulSoup(FILE_PAGE, "lxml")
+        if "/a/" in url: return BeautifulSoup(ALBUM_PAGE, "html.parser")
+        if "/f/AAAA1111" in url: return BeautifulSoup(FILE_A, "html.parser")
+        if "/f/BBBB2222" in url: return BeautifulSoup(FILE_B, "html.parser")
+        return BeautifulSoup(FILE_PAGE, "html.parser")
 
 
 def _meta(mediafiles, path, original):

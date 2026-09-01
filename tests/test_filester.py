@@ -54,7 +54,7 @@ class _FakeClient:
 
     def get_soup(self, url):
         from bs4 import BeautifulSoup
-        return BeautifulSoup(FOLDER_HTML, "lxml")
+        return BeautifulSoup(FOLDER_HTML, "html.parser")
 
 
 def _api(file_id, name, server="https://fsc1.cdn.cr"):

@@ -1,4 +1,64 @@
-# CLI
+# BUIDL — GUI e CLI
+
+## Prévia visual e download seletivo (v1.3.0)
+
+Abra `buidl-gui.exe` (ou execute `python gui.py`), informe a URL da thread,
+os cookies quando necessários e a pasta de destino.
+
+- **Visualizar e escolher** analisa as páginas e abre uma galeria antes do download.
+- A seleção começa vazia; marque somente os itens desejados ou use **Baixar todos**.
+- Busque por nome, post ou host; filtre imagens, vídeos, áudios ou arquivos.
+- **Marcar/Desmarcar resultados** afeta todos os resultados do filtro, não só a página visível.
+- **Baixar selecionados** respeita a seleção, inclusive itens em outras páginas/filtros.
+- **Baixar todos** inclui toda a fila analisada; o botão da tela inicial baixa sem abrir a galeria.
+- **Voltar sem baixar** cancela a prévia sem criar estado de conclusão dos arquivos.
+- Reabrir **Visualizar e escolher** reutiliza a última análise, miniaturas em cache,
+  seleção, filtros e posição na galeria, enquanto o aplicativo continuar aberto.
+- **Atualizar thread**, dentro da galeria, busca novamente as páginas e os links.
+  Mudanças na URL, cookies ou opções que alteram a lista/destino também refazem a análise.
+  Velocidade, tentativas e número de conexões não obrigam uma nova busca.
+
+As miniaturas são carregadas sob demanda, somente em memória, com limite de 4 MiB
+por imagem. Em **Vídeos**, clique em **Prévia do vídeo** para reproduzir um trecho
+de até 6 segundos, sem áudio, com pausa e repetição. A prévia tem resolução reduzida;
+não é um player do vídeo completo. O carregamento usa requisições por trechos,
+orçamento de 24 MiB e prazo de 20 segundos verificado entre operações (uma operação
+de rede/decodificação em andamento pode levar um pouco mais para terminar).
+
+Se o host bloquear a prévia, exigir login ou não oferecer um formato compatível,
+a capa disponível é mantida. Se também não houver capa, aparece um cartão de vídeo.
+Isso **não conta como falha de download** nem impede selecionar/baixar o arquivo.
+Os dois últimos resultados de vídeo ficam em memória ao reabrir a galeria;
+**Tentar novamente** refaz apenas a prévia, sem analisar a thread novamente.
+Fechar o player cancela o carregamento e mantém a seleção. Os codecs necessários
+estão incluídos no EXE; não é preciso instalar um player externo.
+Não há visualização do conteúdo de ZIPs. Alguns hosts só informam o nome final
+ao gerar o link e podem aparecer inicialmente em **Arquivos**.
+
+Para retomar uma execução anterior, mantenha a mesma pasta em **Salvar em**.
+A fila preparada usa as opções informadas antes da análise; feche a prévia para
+alterá-las e analisar novamente.
+
+## Aplicativo Android
+
+O projeto Android está em [android/README.md](android/README.md). Ele usa uma
+interface nativa com o mesmo núcleo Python, permite analisar/selecionar arquivos,
+capturar cookies pelo navegador interno, escolher a pasta de destino, baixar,
+retomar e exportar os downloads pelo seletor do Android.
+O APK é de teste/debug para Android 7+ em arm64 ou x86_64.
+
+## Downloads prontos
+
+As versões publicadas ficam em [GitHub Releases](https://github.com/sujirobase-ctrl/buidl/releases).
+Cada release inclui o APK Android, `buidl-gui.exe`, CLI, modo batch, wheel Python,
+um ZIP portátil dos executáveis e arquivos SHA-256 para conferência.
+
+O workflow em `.github/workflows/build.yml` executa os testes offline e recria
+todos esses artefatos em runners limpos. Pushes e pull requests geram artefatos
+do Actions; uma tag `vX.Y.Z`, igual à versão do `pyproject.toml`, também publica
+a release automaticamente.
+
+## CLI
 
 
 The userscript's thread parser, host matcher table and per-host resolvers are

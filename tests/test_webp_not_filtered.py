@@ -5,10 +5,13 @@ If a future edit re-adds webp to the accepted extensions or direct-link
 pattern, this test fails.
 """
 import sys
-sys.path.insert(0, r"C:\Users\isaac\Downloads\buidl")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import re
-from src.config import DIRECT_LINK_PATTERN, IMAGE_EXTENSIONS, CONTENT_TYPE_EXTENSIONS
+
+from src.config import CONTENT_TYPE_EXTENSIONS, DIRECT_LINK_PATTERN, IMAGE_EXTENSIONS
 from src.parsers.host_parser import parse_hosts
 
 

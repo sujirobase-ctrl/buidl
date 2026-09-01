@@ -9,7 +9,6 @@ can tell at a glance *why* a file failed (timeout, DNS, 403, rate-limit, ...).
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse
 
 # Known hosts get a friendlier explanation so the user knows who is at fault.
 _HOST_HINTS: dict[str, str] = {
@@ -92,11 +91,15 @@ def summarize_error(raw: str) -> str:
         return "não autorizado (401) — sessão pode ter expirado, reexporte cookies.txt"
     if "404" in raw_l or "not found" in raw_l:
         return "arquivo não encontrado (404) — link quebrado"
+    if "410" in raw_l or "gone" in raw_l:
+        return "link temporário expirado (410) — será necessário renová-lo"
     if any(code in raw_l for code in ("500", "502", "503", "504")) or "gateway" in raw_l:
         return "erro temporário do servidor (5xx) — tente de novo mais tarde"
 
     # HTML where a file was expected
     if "html" in raw_l and "instead of a file" in raw_l:
         return "servidor respondeu com página HTML, não o arquivo (login provável expirado)"
+    if "incomplete response" in raw_l:
+        return "download interrompido antes de receber o arquivo completo"
 
     return f"falha de rede{suffix}"

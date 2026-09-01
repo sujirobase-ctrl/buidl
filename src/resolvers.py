@@ -10,10 +10,16 @@ link when it already points at a media file.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import random
 import re
+import shutil
+import subprocess
+import time
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlparse, urlencode
+from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -31,15 +37,59 @@ MEDIA_EXTENSIONS = (
     IMAGE_EXTENSIONS + VIDEO_EXTENSIONS + AUDIO_EXTENSIONS + ARCHIVE_EXTENSIONS
 )
 
+GOFILE_WT_SCRIPT = "https://gofile.io/js/wt.obf.js"
+GOFILE_DEFAULT_SALT = "12af056dacea0b"
+GOFILE_LANGUAGE = "en-US"
+_gofile_salt_cache: str | None = None
+
+
+def _truthy(value: object) -> bool:
+    """Interpret the string booleans used by a few host APIs."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "ok"}
+    return bool(value)
+
+
+def _first_url_for_keys(value: object, keys: tuple[str, ...], depth: int = 0) -> str | None:
+    """Find the first absolute URL stored under one of ``keys`` in nested JSON."""
+    if depth > 7:
+        return None
+    if isinstance(value, dict):
+        for key in keys:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip().lower().startswith(("http://", "https://")):
+                return candidate.strip()
+        for child in value.values():
+            candidate = _first_url_for_keys(child, keys, depth + 1)
+            if candidate:
+                return candidate
+    elif isinstance(value, list):
+        for child in value:
+            candidate = _first_url_for_keys(child, keys, depth + 1)
+            if candidate:
+                return candidate
+    return None
+
 
 @dataclass
 class ResolvedMedia:
-    """A concrete file to download."""
+    """A file to download, optionally backed by a renewable source page."""
 
     url: str
     filename: str
     subfolder: str = ""
     headers: dict[str, str] | None = None
+    source_url: str | None = None
+    resolver: str | None = None
+    force_unique: bool = False
+    thumbnail_url: str | None = None
+    post_label: str = ""
+    origin_url: str | None = None
+
+    @property
+    def state_key(self) -> str:
+        """Stable key used across refreshes of short-lived signed URLs."""
+        return self.source_url or self.url
 
 
 def is_direct_media(url: str) -> bool:
@@ -69,7 +119,29 @@ def _resolve_direct(url: str, _client: HttpClient) -> list[ResolvedMedia]:
     """Treat the URL as an already-direct media link."""
     if not is_direct_media(url):
         return []
-    return [ResolvedMedia(url=url, filename=filename_from_url(url))]
+
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").casefold()
+
+    # Goonbox pages commonly expose both the original and a medium thumbnail
+    # such as ``photo.md.jpg``.  The thumbnail endpoint is frequently removed
+    # while ``photo.jpg`` remains valid, so normalize both entries to the same
+    # original URL.  ThreadDownloader can then de-duplicate them before any
+    # network request is made.
+    if hostname == "goonbox.cr" and "/images/" in parsed.path.casefold():
+        url = re.sub(r"\.(?:md|th)(\.[a-z0-9]{2,5})(?=\?|$)", r"\1", url, flags=re.IGNORECASE)
+
+    headers = None
+    if hostname == "i.redd.it":
+        # A document-style Accept header (and stale browser cookies) can make
+        # Reddit's image CDN return an HTML interstitial for an existing image.
+        headers = {
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Referer": "https://www.reddit.com/",
+            "Cookie": "",
+        }
+
+    return [ResolvedMedia(url=url, filename=filename_from_url(url), headers=headers)]
 
 
 def _resolve_nitter(url: str, _client: HttpClient) -> list[ResolvedMedia]:
@@ -211,8 +283,6 @@ def _resolve_bunkr(url: str, client: HttpClient) -> list[ResolvedMedia]:
         return []
 
     kind, slug = match.group(2), match.group(3)
-    origin = f"https://bunkr{match.group(1)}"
-
     def _sign_one(file_id: str, folder: str) -> list[ResolvedMedia]:
         # Metadata API lives on dl.bunkr.cr regardless of which host served the
         # page (bunkr.cr / bunkr.ph both 404 on their own origin's /api/_001_v2).
@@ -321,7 +391,7 @@ def _resolve_cyberdrop(url: str, client: HttpClient) -> list[ResolvedMedia]:
 
 def _resolve_pixeldrain(url: str, _client: HttpClient) -> list[ResolvedMedia]:
     """pixeldrain uses a stable API path."""
-    match = re.search(r"pixeldrain\.com/([lu])/(\w+)", url)
+    match = re.search(r"(?:pixeldrain\.(?:com|net)|pixeldra\.in)/([lu])/(\w+)", url)
     if not match:
         return []
     kind, file_id = match.groups()
@@ -368,16 +438,19 @@ def _resolve_erome(url: str, client: HttpClient) -> list[ResolvedMedia]:
 
 
 def _resolve_filester(url: str, client: HttpClient) -> list[ResolvedMedia]:
-    """filester.me folder (/f/) or file (/d/) pages.
+    """Resolve Filester v2 links using the server selected for each token.
 
-    The page is an SPA: a folder's file list lives in plain markup, but each
-    file's CDN URL is minted per-request via POST /v2/api/public/download with
-    the file slug (mirrors js/file_dl.js). We replicate that flow here.
+    Filester's old v1 URL and fixed-CDN fallbacks are no longer valid.  The v2
+    response chooses an ``fscN.cdn.cr`` server and the token only works on that
+    server, so the response is deliberately trusted instead of constrained to
+    a hard-coded host list.
     """
-    match = re.search(r"filester\.me/(?:f|d)/([\w\-]+)", url)
+    match = re.search(r"filester\.(?:me|sh|si|gg)/(f|d)/([\w\-]+)", url, re.IGNORECASE)
     if not match:
         return []
-    kind, slug = match.group(0).split("/")[1], match.group(1)
+    kind, slug = match.groups()
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'filester.me'}"
 
     folder = "filester"
     slugs: list[tuple[str, str]] = []  # (slug, display_name)
@@ -388,45 +461,68 @@ def _resolve_filester(url: str, client: HttpClient) -> list[ResolvedMedia]:
         folder = sanitize_name(
             folder_node.get_text(strip=True) if folder_node else "filester",
         )
-        for item in soup.select("div.file-item"):
+        for item in soup.select("div.file-item, a[href*='/d/']"):
             onclick = item.get("onclick", "")
-            m = re.search(r"href=['\"]?(/d/[\w\-]+)", onclick)
+            href = item.get("href", "")
+            m = re.search(r"/d/([\w\-]+)", f"{onclick} {href}")
             if not m:
                 continue
-            slugs.append((m.group(1).split("/")[-1], item.get("data-name", "")))
+            name = item.get("data-name", "")
+            if not name:
+                name_node = item.select_one(".file-name, [data-name]")
+                name = (name_node.get("data-name") if name_node else "") or (
+                    name_node.get_text(" ", strip=True) if name_node else ""
+                )
+            slugs.append((m.group(1), name))
     else:
         slugs.append((slug, ""))
 
     if not slugs:
         return []
 
-    headers = {
-        "Content-Type": "application/json",
-        "Referer": "https://filester.me/",
-    }
     items: list[ResolvedMedia] = []
     seen: set[str] = set()
 
     for fslug, fname in slugs:
-        try:
-            resp = client.session.post(
-                "https://filester.me/v2/api/public/download",
-                json={"file_slug": fslug},
-                headers=headers,
-                timeout=client.timeout,
-            ).json()
-        except (*requests_exceptions(), KeyError, ValueError):
+        resp: dict = {}
+        for attempt in range(3):
+            try:
+                response = client.session.post(
+                    f"{origin}/v2/api/public/download",
+                    json={"file_slug": fslug},
+                    headers={
+                        "Accept": "application/json, text/plain, */*",
+                        "Content-Type": "application/json;charset=UTF-8",
+                        "Origin": origin,
+                        "Referer": f"{origin}/d/{fslug}",
+                    },
+                    timeout=min(client.timeout, 20),
+                )
+                if response.status_code in (429, 500, 502, 503, 504):
+                    if attempt < 2:
+                        time.sleep(1.5 * (attempt + 1))
+                    continue
+                resp = response.json()
+                break
+            except (*requests_exceptions(), KeyError, ValueError):
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+
+        if not resp:
             continue
 
-        if not resp.get("success") or not resp.get("file") or not resp.get("token"):
+        if not _truthy(resp.get("success")) or not resp.get("file") or not resp.get("token"):
             continue
 
-        server = resp.get("server") or "https://p1.filester.me"
+        server = str(resp.get("server") or "").rstrip("/")
+        if not server.startswith(("http://", "https://")):
+            continue
+        file_path = "/".join(quote(part, safe="") for part in str(resp["file"]).split("/"))
         name = resp.get("name") or fname
-        query = {"token": resp["token"], "download": "true"}
+        query = {"token": str(resp["token"]), "download": "true"}
         if name:
             query["n"] = name
-        direct = f"{server}/v2/{resp['file']}?{urlencode(query)}"
+        direct = f"{server}/v2/{file_path}?{urlencode(query)}"
 
         if direct in seen:
             continue
@@ -436,51 +532,262 @@ def _resolve_filester(url: str, client: HttpClient) -> list[ResolvedMedia]:
                 url=direct,
                 filename=sanitize_name(name) or filename_from_url(direct),
                 subfolder=folder,
-                headers={"Referer": "https://filester.me/"},
+                headers={"Referer": f"{origin}/d/{fslug}"},
             ),
         )
     return items
 
 
-def _resolve_gofile(url: str, client: HttpClient) -> list[ResolvedMedia]:
-    """gofile needs a guest token plus an API call."""
+def _queue_filester(url: str, client: HttpClient) -> list[ResolvedMedia]:
+    """Queue stable Filester /d/ pages without minting expiring tokens yet."""
+    match = re.search(r"filester\.(?:me|sh|si|gg)/(f|d)/([\w\-]+)", url, re.IGNORECASE)
+    if not match:
+        return []
+    kind, slug = match.groups()
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc or 'filester.me'}"
+
+    if kind == "d":
+        source = f"{origin}/d/{slug}"
+        return [
+            ResolvedMedia(
+                url=source,
+                filename=f"Filester_{slug}",
+                source_url=source,
+                resolver="filester",
+            )
+        ]
+
+    soup = _soup_of(client, url)
+    folder_node = soup.select_one("h1, title")
+    folder = sanitize_name(
+        folder_node.get_text(strip=True) if folder_node else "filester",
+    )
+    queued: list[ResolvedMedia] = []
+    seen: set[str] = set()
+    for item in soup.select("div.file-item, a[href*='/d/']"):
+        onclick = item.get("onclick", "")
+        href = item.get("href", "")
+        item_match = re.search(r"/d/([\w\-]+)", f"{onclick} {href}")
+        if not item_match:
+            continue
+        item_slug = item_match.group(1)
+        source = f"{origin}/d/{item_slug}"
+        if source in seen:
+            continue
+        seen.add(source)
+        name = item.get("data-name", "")
+        if not name:
+            name_node = item.select_one(".file-name, [data-name]")
+            name = (name_node.get("data-name") if name_node else "") or (
+                name_node.get_text(" ", strip=True) if name_node else ""
+            )
+        queued.append(
+            ResolvedMedia(
+                url=source,
+                filename=sanitize_name(name) if name else f"Filester_{item_slug}",
+                subfolder=folder,
+                source_url=source,
+                resolver="filester",
+            )
+        )
+    return queued
+
+
+def _discover_gofile_salt(client: HttpClient, *, force: bool = False) -> str:
+    """Read GoFile's current WT salt, using Node when available.
+
+    The official generator is intentionally obfuscated.  Executing it with a
+    fake token while replacing its SHA function reveals only the hash preimage;
+    the final component is the public salt.  If Node or the live script is not
+    available, the last known salt keeps the resolver usable offline.
+    """
+    global _gofile_salt_cache
+    if _gofile_salt_cache and not force:
+        return _gofile_salt_cache
+
+    node = shutil.which("node")
+    if node:
+        try:
+            source = client.get(GOFILE_WT_SCRIPT, timeout=min(client.timeout, 20)).text
+            if "generateWT" in source:
+                runner = (
+                    "const vm=require('vm');let s='';process.stdin.setEncoding('utf8');"
+                    "process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{"
+                    "const box={navigator:{userAgent:'probe',language:'en-US'}};"
+                    "vm.createContext(box);vm.runInContext(s,box,{timeout:5000});"
+                    "vm.runInContext('_sha256=x=>x',box);"
+                    "process.stdout.write(String(vm.runInContext(\"generateWT('TOKEN')\",box)));});"
+                )
+                flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                result = subprocess.run(
+                    [node, "-e", runner],
+                    input=source,
+                    text=True,
+                    capture_output=True,
+                    timeout=25,
+                    check=False,
+                    creationflags=flags,
+                )
+                parts = result.stdout.strip().split("::")
+                if result.returncode == 0 and len(parts) >= 5 and re.fullmatch(r"[\w-]{6,64}", parts[-1]):
+                    _gofile_salt_cache = parts[-1]
+                    return _gofile_salt_cache
+        except (*requests_exceptions(), OSError, subprocess.SubprocessError):
+            pass
+
+    _gofile_salt_cache = GOFILE_DEFAULT_SALT
+    return _gofile_salt_cache
+
+
+def _gofile_website_token(
+    account_token: str,
+    *,
+    salt: str,
+    user_agent: str = USER_AGENT,
+    language: str = GOFILE_LANGUAGE,
+    now: float | None = None,
+) -> str:
+    """Compute the current four-hour-bucket X-Website-Token."""
+    bucket = int((time.time() if now is None else now) / 14_400)
+    raw = f"{user_agent}::{language}::{account_token}::{bucket}::{salt}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _resolve_gofile(
+    url: str,
+    client: HttpClient,
+    passwords: list[str] | None = None,
+) -> list[ResolvedMedia]:
+    """Resolve current GoFile files/folders with dynamic website auth."""
     match = re.search(r"gofile\.io/d/(\w+)", url)
     if not match:
         return []
     content_id = match.group(1)
+    passwords = passwords or []
 
-    try:
+    def new_account() -> str:
         account = client.session.post(
             "https://api.gofile.io/accounts",
+            json={},
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
             timeout=client.timeout,
         ).json()
         token = account["data"]["token"]
+        client.session.cookies.set("accountToken", token, domain=".gofile.io", path="/")
+        try:
+            client.session.get(
+                "https://api.gofile.io/accounts/website",
+                headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
+                timeout=client.timeout,
+            )
+        except requests_exceptions():
+            pass
+        return token
 
-        response = client.session.get(
-            f"https://api.gofile.io/contents/{content_id}",
-            params={"wt": "4fd6sg89d7s6"},
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=client.timeout,
-        ).json()
-    except (*requests_exceptions(), KeyError, json.JSONDecodeError):
+    try:
+        token = new_account()
+    except (*requests_exceptions(), KeyError, ValueError, json.JSONDecodeError):
         return []
 
-    data = response.get("data", {})
-    folder = sanitize_name(data.get("name", content_id))
-    children = data.get("children", {}) or {}
+    def fetch(content: str, password_hash: str | None = None, *, refresh_salt: bool = False) -> dict:
+        salt = _discover_gofile_salt(client, force=refresh_salt)
+        params: dict[str, object] = {
+            "contentFilter": "",
+            "page": 1,
+            "pageSize": 1000,
+            "sortField": "createTime",
+            "sortDirection": -1,
+        }
+        if password_hash:
+            params["password"] = password_hash
+        website_token = _gofile_website_token(token, salt=salt)
+        response = client.session.get(
+            f"https://api.gofile.io/contents/{content}",
+            params=params,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}",
+                "X-Website-Token": website_token,
+                "X-BL": GOFILE_LANGUAGE,
+            },
+            timeout=client.timeout,
+        )
+        return response.json()
+
+    def fetch_with_password(content: str) -> dict:
+        nonlocal token
+        try:
+            result = fetch(content)
+            status = str(result.get("status") or result.get("message") or "").lower()
+            if any(word in status for word in ("unauthorized", "invalid token", "website-token")):
+                _discover_gofile_salt(client, force=True)
+                token = new_account()
+                result = fetch(content)
+            if result.get("status") == "error-passwordRequired":
+                for password in passwords:
+                    attempt = fetch(content, hashlib.sha256(password.encode("utf-8")).hexdigest())
+                    if attempt.get("status") == "ok":
+                        return attempt
+            return result
+        except (*requests_exceptions(), KeyError, ValueError, json.JSONDecodeError):
+            return {}
+
+    root = fetch_with_password(content_id)
+    if root.get("status") != "ok" or not isinstance(root.get("data"), dict):
+        return []
+
+    root_data = root["data"]
+    folder = sanitize_name(root_data.get("name", content_id))
 
     items: list[ResolvedMedia] = []
-    for child in children.values():
-        if child.get("type") != "file" or not child.get("link"):
-            continue
+    seen_folders: set[str] = set()
+    seen_urls: set[str] = set()
+
+    def add_file(obj: dict) -> None:
+        file_id = str(obj.get("id") or obj.get("code") or "")
+        candidates = [obj.get("directLink"), obj.get("link"), obj.get("downloadLink")]
+        link = next((str(item) for item in candidates if item and "/download/direct/" in str(item)), None)
+        if not link:
+            link = next((str(item) for item in candidates if item), None)
+        if not link and file_id:
+            encoded_name = quote(str(obj.get("name") or file_id), safe="")
+            link = f"https://gofile.io/download/web/{file_id}/{encoded_name}"
+        if not link or link in seen_urls:
+            return
+        seen_urls.add(link)
         items.append(
             ResolvedMedia(
-                url=child["link"],
-                filename=sanitize_name(child.get("name", "")) or filename_from_url(child["link"]),
+                url=link,
+                filename=sanitize_name(str(obj.get("name") or "")) or filename_from_url(link),
                 subfolder=folder,
                 headers={"Cookie": f"accountToken={token}", "Referer": "https://gofile.io/"},
-            ),
+            )
         )
+
+    def walk(data: dict) -> None:
+        if data.get("type") == "file":
+            add_file(data)
+            return
+        children = data.get("children") or {}
+        if not isinstance(children, dict):
+            return
+        for child in children.values():
+            if not isinstance(child, dict):
+                continue
+            if child.get("type") == "file":
+                add_file(child)
+                continue
+            if child.get("type") == "folder":
+                child_id = str(child.get("id") or child.get("code") or "")
+                if not child_id or child_id in seen_folders:
+                    continue
+                seen_folders.add(child_id)
+                nested = fetch_with_password(child_id)
+                if nested.get("status") == "ok" and isinstance(nested.get("data"), dict):
+                    walk(nested["data"])
+
+    walk(root_data)
     return items
 
 
@@ -540,49 +847,176 @@ def _resolve_imgur(url: str, client: HttpClient) -> list[ResolvedMedia]:
 
 
 def _resolve_turbo(url: str, client: HttpClient) -> list[ResolvedMedia]:
-    """turbo.cr embed pages hand the real file to a signed URL via /api/sign.
+    """Resolve Turbo singles/albums with bounded retries and legacy fallback."""
+    if "turbocdn.st" in url and is_direct_media(url):
+        return _resolve_direct(url, client)
 
-    The embed page runs `fetch('/api/sign?v=<id>')` and gets back JSON with a
-    time-limited `url` (token + exp params on turbocdn.st). We replicate that so
-    the downloader can grab the mp4 directly.
-    """
-    match = re.search(r"turbo\.cr/(?:embed/)?([\w\-]+)", url)
+    if re.search(r"turbo\.cr/a/", url, re.IGNORECASE):
+        soup = _soup_of(client, url)
+        folder_node = soup.select_one("h1, title")
+        folder = sanitize_name(folder_node.get_text(" ", strip=True) if folder_node else "turbo")
+        items: list[ResolvedMedia] = []
+        seen: set[str] = set()
+        for anchor in soup.select("a[href*='/embed/'], a[href*='/v/'], a[href*='/d/']"):
+            item_url = urljoin(url, anchor.get("href", ""))
+            if not item_url or item_url in seen:
+                continue
+            seen.add(item_url)
+            for media in _resolve_turbo(item_url, client):
+                media.subfolder = folder
+                items.append(media)
+        return items
+
+    match = re.search(r"turbo\.cr/(?:embed|v|d)/([\w\-]+)", url, re.IGNORECASE)
     if not match:
         return []
     video_id = match.group(1)
 
-    try:
-        resp = client.session.get(
-            f"https://turbo.cr/api/sign?v={video_id}",
-            headers={
-                "User-Agent": USER_AGENT,
-                "Referer": f"https://turbo.cr/embed/{video_id}",
-                "Accept": "application/json",
-            },
-            timeout=client.timeout,
-        ).json()
-    except (*requests_exceptions(), json.JSONDecodeError):
-        return []
+    referer = f"https://turbo.cr/embed/{video_id}"
+    resp: dict = {}
+    for attempt in range(3):
+        for endpoint in ("api/sign", "sign"):
+            try:
+                response = client.session.get(
+                    f"https://turbo.cr/{endpoint}?v={video_id}",
+                    headers={"User-Agent": USER_AGENT, "Referer": referer, "Accept": "application/json"},
+                    timeout=min(client.timeout, 5),
+                )
+                if response.status_code == 200:
+                    candidate = response.json()
+                    if candidate.get("url") and (
+                        candidate.get("success") is None or _truthy(candidate.get("success"))
+                    ):
+                        resp = candidate
+                        break
+            except (*requests_exceptions(), json.JSONDecodeError):
+                continue
+        if resp:
+            break
+        if attempt < 2:
+            time.sleep(random.uniform(0.7, 1.4))
 
-    signed = resp.get("url")
-    if not signed or not resp.get("success"):
+    signed = str(resp.get("url") or "")
+    if not signed:
         return []
 
     return [
         ResolvedMedia(
             url=signed,
-            filename=resp.get("filename") or f"{video_id}.mp4",
+            filename=(
+                resp.get("original_filename")
+                or resp.get("filename")
+                or filename_from_url(signed)
+                or f"{video_id}.mp4"
+            ),
             headers={"Referer": "https://turbo.cr/"},
         ),
     ]
 
 
-def _resolve_goodbox(url: str, client: HttpClient) -> list[ResolvedMedia]:
-    """goonbox.cr image/album host (common on SimpCity).
+def _queue_turbo(url: str, client: HttpClient) -> list[ResolvedMedia]:
+    """Keep Turbo page IDs stable and sign each file only when a worker starts."""
+    if "turbocdn.st" in url and is_direct_media(url):
+        return _resolve_direct(url, client)
 
-    Mirrors ForumPostDownloader: /img/<id> -> GET /api/images/<id> (JSON with
-    image.original_url); /a/<slug> -> paginated /api/albums/<slug>/images.
+    if re.search(r"turbo\.cr/a/", url, re.IGNORECASE):
+        soup = _soup_of(client, url)
+        folder_node = soup.select_one("h1, title")
+        folder = sanitize_name(
+            folder_node.get_text(" ", strip=True) if folder_node else "turbo",
+        )
+        queued: list[ResolvedMedia] = []
+        seen: set[str] = set()
+        for anchor in soup.select("a[href*='/embed/'], a[href*='/v/'], a[href*='/d/']"):
+            source = urljoin(url, anchor.get("href", ""))
+            match = re.search(r"turbo\.cr/(?:embed|v|d)/([\w\-]+)", source, re.IGNORECASE)
+            if not match or source in seen:
+                continue
+            seen.add(source)
+            image = anchor.select_one("img")
+            poster = (image.get("data-src") or image.get("src")) if image else None
+            queued.append(
+                ResolvedMedia(
+                    url=source,
+                    filename=f"Turbo_{match.group(1)}",
+                    subfolder=folder,
+                    source_url=source,
+                    resolver="turbo",
+                    thumbnail_url=urljoin(url, poster) if poster else None,
+                )
+            )
+        return queued
+
+    match = re.search(r"turbo\.cr/(?:embed|v|d)/([\w\-]+)", url, re.IGNORECASE)
+    if not match:
+        return []
+    source = f"https://turbo.cr/v/{match.group(1)}"
+    return [
+        ResolvedMedia(
+            url=source,
+            filename=f"Turbo_{match.group(1)}",
+            source_url=source,
+            resolver="turbo",
+        )
+    ]
+
+
+def refresh_media(media: ResolvedMedia, client: HttpClient) -> ResolvedMedia | None:
+    """Mint a fresh direct URL for renewable hosts immediately before download."""
+    source = media.source_url or media.url
+    if media.resolver == "filester":
+        resolved = _resolve_filester(source, client)
+    elif media.resolver == "turbo":
+        resolved = _resolve_turbo(source, client)
+    else:
+        return media
+    if not resolved:
+        return None
+    fresh = resolved[0]
+    fresh.subfolder = media.subfolder or fresh.subfolder
+    fresh.source_url = source
+    fresh.resolver = media.resolver
+    fresh.force_unique = media.force_unique
+    return fresh
+
+
+def _resolve_goodbox(url: str, client: HttpClient) -> list[ResolvedMedia]:
+    """Resolve Goonbox with API-shape tolerance and page thumbnail fallback.
+
+    The userscript can open a first-party browser tab to cross Cloudflare.  A
+    CLI cannot reuse that browser context, so it first visits the real page to
+    establish cookies, then calls the API with first-party headers.  If the API
+    is still challenged, the embedded medium-resolution image is returned
+    instead of silently dropping the resource.
     """
+    try:
+        page_soup = _soup_of(client, url)
+    except requests_exceptions():
+        page_soup = BeautifulSoup("", "html.parser")
+    fallback = _meta_content(page_soup, "og:image", "twitter:image")
+    if not fallback:
+        image = page_soup.select_one("img[src*='cuckcapital'], img[src*='cdn.cr'], main img[src]")
+        fallback = urljoin(url, image.get("src")) if image and image.get("src") else None
+
+    def api_json(path: str) -> dict | None:
+        try:
+            response = client.session.get(
+                f"https://goonbox.cr{path}",
+                headers={
+                    "Accept": "application/json",
+                    "Origin": "https://goonbox.cr",
+                    "Referer": url,
+                    "User-Agent": USER_AGENT,
+                },
+                timeout=client.timeout,
+            )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            return data if isinstance(data, dict) else None
+        except (*requests_exceptions(), json.JSONDecodeError, ValueError):
+            return None
+
     if "/a/" in url:
         match = re.search(r"goonbox\.cr/a/([\w\-]+)", url)
         if not match:
@@ -592,20 +1026,14 @@ def _resolve_goodbox(url: str, client: HttpClient) -> list[ResolvedMedia]:
         seen: set[str] = set()
         page = 1
         while True:
-            try:
-                resp = client.session.get(
-                    f"https://goonbox.cr/api/albums/{slug}/images",
-                    params={"page": page},
-                    headers={"Referer": url, "Accept": "application/json"},
-                    timeout=client.timeout,
-                ).json()
-            except (*requests_exceptions(), json.JSONDecodeError):
+            resp = api_json(f"/api/albums/{slug}/images?page={page}")
+            if not resp:
                 break
-            imgs = (resp.get("images") or []) if isinstance(resp, dict) else []
+            imgs = resp.get("images") or []
             if not imgs:
                 break
             for img in imgs:
-                src = img.get("original_url") or img.get("url")
+                src = _first_url_for_keys(img, ("original_url", "originalUrl", "original", "url"))
                 if src and src not in seen:
                     seen.add(src)
                     items.append(
@@ -619,24 +1047,136 @@ def _resolve_goodbox(url: str, client: HttpClient) -> list[ResolvedMedia]:
             if not last or page >= int(last):
                 break
             page += 1
+        if not items:
+            for node in page_soup.select("a[href], img[src]"):
+                src = node.get("href") or node.get("src")
+                if src:
+                    src = urljoin(url, src)
+                    if is_direct_media(src) and src not in seen:
+                        seen.add(src)
+                        items.append(ResolvedMedia(url=src, filename=filename_from_url(src), subfolder=f"goonbox_{slug}"))
         return items
 
     match = re.search(r"goonbox\.cr/img/([\w\-]+)", url)
     if not match:
         return []
     img_id = match.group(1)
-    try:
-        resp = client.session.get(
-            f"https://goonbox.cr/api/images/{img_id}",
-            headers={"Referer": url, "Accept": "application/json"},
-            timeout=client.timeout,
-        ).json()
-    except (*requests_exceptions(), json.JSONDecodeError):
-        return []
-    src = (resp.get("image") or {}).get("original_url") or resp.get("original_url")
+    resp = api_json(f"/api/images/{img_id}")
+    src = _first_url_for_keys(resp, ("original_url", "originalUrl", "original")) if resp else None
+    if not src:
+        src = fallback
     if not src:
         return []
+
+    # Only replace an original after both HEAD and a ranged GET confirm failure.
+    if src != fallback:
+        reachable = False
+        try:
+            head = client.session.head(src, headers={"Referer": url}, timeout=min(client.timeout, 10), allow_redirects=True)
+            reachable = 200 <= head.status_code < 400
+        except requests_exceptions():
+            pass
+        if not reachable:
+            try:
+                probe = client.session.get(
+                    src,
+                    headers={"Referer": url, "Range": "bytes=0-0"},
+                    timeout=min(client.timeout, 10),
+                    stream=True,
+                    allow_redirects=True,
+                )
+                reachable = 200 <= probe.status_code < 400
+                probe.close()
+            except requests_exceptions():
+                pass
+        if not reachable and fallback:
+            src = fallback
     return [ResolvedMedia(url=src, filename=filename_from_url(src))]
+
+
+def _resolve_coomer(url: str, client: HttpClient) -> list[ResolvedMedia]:
+    """Resolve Coomer profile pages and direct data/thumbnail links."""
+    if re.search(r"coomer\.(?:st|party|su)/(?:data|thumbnail)/", url, re.IGNORECASE):
+        return _resolve_direct(url, client)
+    if "/user/" not in url:
+        return []
+
+    profile_id = urlparse(url).path.rstrip("/").split("/")[-1]
+    current = url.split("?", 1)[0]
+    post_links: list[str] = []
+    seen_pages: set[str] = set()
+    for _ in range(100):
+        if current in seen_pages:
+            break
+        seen_pages.add(current)
+        soup = _soup_of(client, current)
+        for anchor in soup.select(".card-list__items article .post-card__heading a[href], article a[href*='/post/']"):
+            post_url = urljoin(current, anchor.get("href", ""))
+            if post_url and post_url not in post_links:
+                post_links.append(post_url)
+        next_node = soup.select_one("a[title='Next page'][href], a[rel='next'][href]")
+        if not next_node:
+            break
+        current = urljoin(current, next_node.get("href", ""))
+
+    items: list[ResolvedMedia] = []
+    seen: set[str] = set()
+    for post_url in post_links:
+        soup = _soup_of(client, post_url)
+        post_id = urlparse(post_url).path.rstrip("/").split("/")[-1]
+        for anchor in soup.select(".post__thumbnail a[href], .post__attachment-link[href], .fileThumb[href]"):
+            direct = urljoin(post_url, anchor.get("href", ""))
+            if direct in seen or not is_direct_media(direct):
+                continue
+            seen.add(direct)
+            items.append(
+                ResolvedMedia(
+                    url=direct,
+                    filename=filename_from_url(direct),
+                    subfolder=sanitize_name(f"{profile_id}/{post_id}"),
+                )
+            )
+    return items
+
+
+def _resolve_video_page(url: str, client: HttpClient) -> list[ResolvedMedia]:
+    """Resolve common adult/video pages instead of treating HTML as media."""
+    soup = _soup_of(client, url)
+
+    if "noodlemagazine.com" in url:
+        iframe = soup.select_one("#iplayer[src], iframe[src*='/player/']")
+        if iframe and iframe.get("src"):
+            playlist = urljoin(url, iframe["src"]).replace("/player/", "/playlist/")
+            try:
+                payload = client.get_json(playlist, headers={"Referer": url})
+                sources = payload.get("sources") or []
+                if sources and sources[0].get("file"):
+                    src = urljoin(playlist, sources[0]["file"])
+                    return [ResolvedMedia(url=src, filename=filename_from_url(src), headers={"Referer": url})]
+            except (*requests_exceptions(), KeyError, ValueError, json.JSONDecodeError):
+                pass
+
+    node = soup.select_one("video source[src], video[src]")
+    src = (node.get("src") if node else None) or _meta_content(
+        soup,
+        "og:video",
+        "og:video:url",
+        "og:video:secure_url",
+        "twitter:player:stream",
+    )
+    if not src:
+        source = str(soup)
+        candidates = re.findall(
+            r"https?:\\?/\\?/[^^\s\"'<>]+?\.(?:mp4|m3u8|webm)(?:\?[^\s\"'<>]*)?",
+            source,
+            re.IGNORECASE,
+        )
+        if candidates:
+            src = candidates[-1].replace(r"\/", "/").replace("&amp;", "&")
+    if not src:
+        return []
+    src = urljoin(url, src)
+    return [ResolvedMedia(url=src, filename=filename_from_url(src), headers={"Referer": url})]
 
 
 def _resolve_box(url: str, client: HttpClient) -> list[ResolvedMedia]:
@@ -709,37 +1249,46 @@ RESOLVERS: list[tuple[str, object]] = [
     (r"nitter\.[^/]+/pic/", _resolve_nitter),
     (r"imagevenue\.com", _resolve_imagevenue),
     (r"(cdn|i|stream)\d*\.bunkr|bunkrr?\.|bunkrrr\.org|bunkr-cache\.se|apidl\.bunkr\.ru|get\.bunkrr\.su|bunkr\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|red|ru|se|si|site|pk|ph|ps|sk|ws)", _resolve_bunkr),
-    (r"cyberdrop\.(me|to|cc|nl|cloud|ch|cr)|fs-\d+\.cyberdrop|cyberfile\.(su|me)", _resolve_cyberdrop),
-    (r"pixeldrain\.com/[lu]/", _resolve_pixeldrain),
+    (r"cyberdrop\.[a-z]{2,}|fs-\d+\.cyberdrop|cyberfile\.(su|me)", _resolve_cyberdrop),
+    (r"(?:pixeldrain\.(?:com|net)|pixeldra\.in)/[lu]/", _resolve_pixeldrain),
     (r"erome\.com/a/", _resolve_erome),
-    (r"filester\.(me|sh|si|gg)/(f|d)/", _resolve_filester),
+    (r"filester\.(me|sh|si|gg)/(f|d)/", _queue_filester),
     (r"gofile\.io/d/", _resolve_gofile),
     (r"redgifs\.com/(ifr|watch)/", _resolve_redgifs),
     (r"saint\d?\.(to|su|pk|cr)", _resolve_saint),
     (r"imgur\.(com|io)", _resolve_imgur),
-    (r"turbo\.cr/(?:embed/)?[\w\-]+|turbocdn\.st", _resolve_turbo),
+    (r"turbo\.cr/(?:embed|v|d|a)/[\w\-]+|turbocdn\.st", _queue_turbo),
     (r"goonbox\.cr/(?:img|a)/", _resolve_goodbox),
     (r"(postimg|pixxxels)\.cc", _resolve_postimg),
     (r"pixhost\.to", _resolve_pixhost),
     (r"imgbox\.com", _resolve_imgbox),
-    (r"ibb\.co/album/|jpg\d?\.\w+/a/|jpg\d?\.(fish|fishing|pet|su|homes|church)/a/|pixl\.(li|is)/album/|img\.kiwi/album/", _resolve_gallery),
-    (r"ibb\.co|jpg\d?\.(church|fish|fishing|pet|su|homes)|pixl\.(li|is)|img\.kiwi|imagebam\.com",
+    (r"ibb\.co/album/|jpe?g\d?\.\w+/(?:a|album)/|pixl\.(li|is)/album/|img\.kiwi/album/|imgvb\.com/album", _resolve_gallery),
+    (r"ibb\.co|jpe?g\d?\.(church|fish|fishing|pet|su|cr|homes)|pixl\.(li|is)|img\.kiwi|imgvb\.com|imagebam\.com",
      _resolve_meta_image),
     (r"box\.com|boxcloud\.com", _resolve_box),
     (r"pomf2?\.lain\.la|pomf\.lain\.la", _resolve_pomf2),
-    (r"coomer\.(st|party|su)|kemono\.(cr|su|party)", _resolve_direct),
+    (r"coomer\.(st|party|su)", _resolve_coomer),
+    (r"kemono\.(cr|su|party)", _resolve_direct),
     (r"cuckcapital\.cr|scdn\.st|cache8\.st|cdn\.cr|simp\d?\.cuckcapital\.cr", _resolve_direct),
     (r"onlyfans\.com|pbs\.twimg\.com|media\.tumblr\.com|reddit\.com|twitter\.com", _resolve_direct),
-    (r"pornhub\.com|spankbang\.com|sb-cd\.com|xvideos\.com|rule34\.xxx|noodlemagazine\.com|pvvstream\.pro", _resolve_direct),
+    (r"pornhub\.com|spankbang\.com|xvideos\.com|rule34\.xxx|noodlemagazine\.com|pvvstream\.pro", _resolve_video_page),
+    (r"sb-cd\.com", _resolve_direct),
 ]
 
 
-def resolve(url: str, client: HttpClient) -> list[ResolvedMedia]:
+def resolve(
+    url: str,
+    client: HttpClient,
+    passwords: list[str] | None = None,
+) -> list[ResolvedMedia]:
     """Resolve a single host URL into concrete downloadable media."""
     for pattern, resolver in RESOLVERS:
         if re.search(pattern, url, re.IGNORECASE):
             try:
-                resolved = resolver(url, client)  # type: ignore[operator]
+                if resolver is _resolve_gofile:
+                    resolved = resolver(url, client, passwords=passwords)  # type: ignore[operator]
+                else:
+                    resolved = resolver(url, client)  # type: ignore[operator]
             except Exception:  # noqa: BLE001 - a broken host must not kill the run
                 resolved = []
             if resolved:

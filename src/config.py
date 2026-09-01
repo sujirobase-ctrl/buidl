@@ -72,7 +72,7 @@ LOG_COLORS = {
 
 PROGRESS_COLUMNS_SEPARATOR = "[grey58]•"
 
-VERSION = "1.0.0"
+VERSION = "1.3.0"
 
 
 def get_version_string() -> str:
@@ -169,16 +169,21 @@ CONTENT_TYPE_EXTENSIONS = {
 # Each entry: (name, category, single_regex, album_regex | None)
 
 HOSTS: list[tuple[str, str, str, str | None]] = [
-    ("simpcity.su", "Attachments", r"simpcity\.su/attachments", None),
-    ("coomer.party", "Profiles", r"coomer\.(party|su)/[\w.\-]+/user", None),
-    ("coomer.party", "image", r"(\w+\.)?coomer\.(party|su)/(data|thumbnail)", None),
+    (
+        "simpcity",
+        "Attachments",
+        r"simpcity\.(su|cr|is|cz|hk|rs|ax)/(attachments|data/video)/",
+        None,
+    ),
+    ("coomer", "Profiles", r"coomer\.(st|party|su)/[\w.\-]+/user", None),
+    ("coomer", "image", r"(\w+\.)?coomer\.(st|party|su)/(data|thumbnail)", None),
     (
         "jpg.church",
         "image",
-        r"(simp\d+\.)?jpg\d?\.(church|fish|fishing|pet|su|homes)/(?!(images/0fya082315al\.png|img/))",
-        r"jpg\d?\.(church|fish|fishing|pet|su|homes)/a/[\w.\-]+",
+        r"(simp\d+\.)?(cuckcapital\.cr|jpe?g\d?\.(church|fish|fishing|pet|su|cr|homes))/(?!(img/|a/|album/))",
+        r"jpe?g\d?\.(church|fish|fishing|pet|su|cr|homes)/(a|album)/[\w.\-]+",
     ),
-    ("kemono.party", "direct link", r".{2,6}\.kemono\.(party|su)/data/", None),
+    ("kemono", "direct link", r".{2,6}\.kemono\.(cr|party|su)/data/", None),
     ("postimg.cc", "image", r"i\.?(postimg|pixxxels)\.cc/(.{8})", None),
     (
         "ibb.co",
@@ -194,34 +199,54 @@ HOSTS: list[tuple[str, str, str, str | None]] = [
     ("reddit.com", "image", r"(\w+)?\.redd\.it", None),
     ("twitter.com", "image", r"([\w.\-]+)?twimg\.com/", None),
     ("pixl.li", "image", r"([a-z]\d*\.)pixl\.(li|is)/((img|image)/)?", r"pixl\.(li|is)/album/"),
-    ("pixhost.to", "image", r"t\d*\.pixhost\.to/", r"pixhost\.to/gallery/"),
+    ("pixhost.to", "image", r"(t|img)\d*\.pixhost\.to/", r"pixhost\.to/gallery/"),
     ("imagebam.com", "image", r"imagebam\.com/(view|gallery)", None),
     ("saint.to", "video", r"(saint\d?\.(to|su|pk)/embed/|([\w.\-]+\.)?saint\d?\.(to|su|pk)/videos)", None),
     ("redgifs.com", "video", r"redgifs\.com/(ifr|watch)/[\w\-]+", None),
     (
         "bunkr",
         "",
-        r"((stream|cdn\d*|i\d*)\.)?bunkr+(\.[a-z]{2,6})/(v/|f/|d/)?[\w.\-]+\.[a-zA-Z0-9]{2,4}",
-        r"bunkr+(\.[a-z]{2,6})/(a|f)/[\w\-]+",
+        r"((stream|cdn\d*|i\d*|i-pizza|big-taco-1img)\.)?bunkr+(\.[a-z]{2,6})/(v/|f/|d/)?[\w.\-]+",
+        r"bunkr+(\.[a-z]{2,6})/a/[\w\-]+",
     ),
-    ("pixeldrain.com", "", r"pixeldrain\.com/[lu]/", None),
+    ("pixeldrain", "", r"(focus\.)?(pixeldrain\.(com|net)|pixeldra\.in)/[lu]/", None),
     ("gofile.io", "", r"gofile\.io/d/", None),
     ("erome.com", "", r"erome\.com/a/", None),
     ("cyberfile.me", "", r"cyberfile\.(su|me)/\w+/?", r"cyberfile\.(su|me)/folder/"),
-    ("cyberdrop.me", "", r"fs-\d+\.cyberdrop\.(me|to|cc|nl)/", r"cyberdrop\.(me|to|cc|nl)/a/"),
+    (
+        "cyberdrop",
+        "",
+        r"(fs-\d+\.cyberdrop\.[a-z]{2,}/|cyberdrop\.[a-z]{2,}/(f|e)/)",
+        r"cyberdrop\.[a-z]{2,}/a/",
+    ),
     # filester.me — SimpCity file-host folders (e.g. Ikumi VODs / patreon audios)
-    ("filester.me", "Files", None, r"filester\.me/f/[\w\-]+"),
+    (
+        "filester",
+        "Files",
+        r"filester\.(me|sh|si|gg)/d/[\w\-]+",
+        r"filester\.(me|sh|si|gg)/f/[\w\-]+",
+    ),
     # turbo.cr — SimpCity video host; real mp4 comes from /api/sign (see _resolve_turbo)
-    ("turbo.cr", "Video", None, r"turbo\.cr/(?:embed/)?[\w\-]+"),
+    (
+        "turbo.cr",
+        "Video",
+        r"([\w\-]+\.)?turbo\.cr/(embed|v|d)/[\w\-]+",
+        r"([\w\-]+\.)?turbo\.cr/a/[\w\-]+",
+    ),
     # goonbox.cr — SimpCity image/album host (see _resolve_goodbox)
-    ("goonbox.cr", "Images", None, r"goonbox\.cr/(?:img|a)/[\w\-]+"),
+    ("goonbox.cr", "Images", r"goonbox\.cr/img/[\w\-]+", r"goonbox\.cr/a/[\w\-]+"),
     # box.com / boxcloud.com — cloud share links (see _resolve_box)
     ("box.com", "Files", None, r"box\.(com|cloud\.com)/s/[\w\-]+"),
     # pomf2.lain.la — pomf clone direct file host (see _resolve_pomf2)
     ("pomf2.lain.la", "Files", None, r"pomf2?\.lain\.la/(?:f|data|files)/[\w\-]+"),
     # SimpCity CDN mirrors — direct links already caught by the fallback, listed
     # here so they show up as a known host
-    ("cuckcapital.cr", "Images", r"simp\d+\.cuckcapital\.cr|cdn\.cr|cuckcapital\.cr", None),
+    (
+        "cuckcapital.cr",
+        "Images",
+        r"(?:simp\d+\.cuckcapital\.cr|(?:[\w-]+\.)?cdn\.cr|cuckcapital\.cr)/",
+        None,
+    ),
     # saint2 mirror
     ("saint2.cr", "Video", r"saint2?\.(to|su|pk|cr)/(?:embed|videos)/", None),
     # adult video hosts — direct links fall through to _resolve_direct
@@ -248,7 +273,7 @@ HOSTS: list[tuple[str, str, str, str | None]] = [
 # embedded in HTML attributes like <img src="...">.
 DIRECT_LINK_PATTERN = (
     r"https?://[^\s\"'<>]+?\."
-    r"(?:jpg|jpeg|png|gif|bmp|webp|mp4|webm|mkv|mov|m4v|avi|mp3|wav|ogg|m4a|flac|aac|opus|zip|rar|7z)"
+    r"(?:jpg|jpeg|png|gif|bmp|mp4|webm|mkv|mov|m4v|avi|mp3|wav|ogg|m4a|flac|aac|opus|zip|rar|7z)"
     r"(?=[\"'<>?\s]|$)"
 )
 

@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
+
+from bs4 import BeautifulSoup
 
 from src.config import FailReason, SkipReason, TaskResult, download_root
+from src.error_summary import summarize_error
 from src.file_utils import load_state, matches_any, sanitize_name, save_state
 from src.parsers import ParsedPost, ThreadParser, parse_hosts
-from src.resolvers import ResolvedMedia, resolve
-from .rate_limiter import RateLimiter
+from src.resolvers import ResolvedMedia, refresh_media, resolve
 
-from .media_downloader import MediaDownloader
+from .media_downloader import DownloadOutcome, MediaDownloader
+from .rate_limiter import RateLimiter
 
 LOGIN_WALL_MARKERS = (
     "you must be logged in",
@@ -47,6 +53,7 @@ class ThreadOptions:
     """Runtime options for a thread download."""
 
     custom_path: str | None = None
+    download_path: str | None = None
     max_pages: int = 1
     all_pages: bool = False
     post_ids: list[str] = field(default_factory=list)
@@ -61,6 +68,18 @@ class ThreadOptions:
     separate_posts: bool = False
     flat: bool = False
     clean_part: bool = False
+    cancel_event: threading.Event | None = None
+    pause_event: threading.Event | None = None
+
+
+@dataclass
+class PreparedThread:
+    """Resolved queue; preparing it writes neither media nor download state."""
+
+    title: str
+    root: Path
+    plan: list[tuple[ResolvedMedia, Path]]
+    post_count: int
 
 
 class ThreadDownloader:
@@ -87,35 +106,84 @@ class ThreadDownloader:
 
     def download_thread(self, url: str) -> bool:
         """Download a whole thread. Returns True when something failed."""
+        prepared = self.prepare_thread(url)
+        return True if prepared is None else self.download_prepared(prepared)
+
+    def prepare_thread(self, url: str) -> PreparedThread | None:
+        """Collect requested pages and resolve links without downloading."""
+        self.thread_url = url
         pages = self._collect_pages(url)
+        if self._cancelled():
+            self._log_cancelled()
+            return None
         if not pages:
             self.live_manager.update_log(
-                event="Empty thread",
-                details=f"No posts parsed from {url}",
+                event="Empty thread", details=f"No posts parsed from {url}",
             )
-            return True
-
+            return None
         title, posts = pages
-        root = download_root(self.options.custom_path) / sanitize_name(title)
-        state = load_state(root)
-
+        root = self._download_root() / sanitize_name(title)
         media_plan = self._build_plan(posts, root)
-        if not media_plan:
-            self.live_manager.update_log(
-                event="Nothing to download",
-                details=f"No supported hosts found in {title}",
-            )
-            return False
-
-        self.live_manager.add_overall_task(title, num_tasks=len(media_plan))
+        if self._cancelled():
+            self._log_cancelled()
+            return None
         self.live_manager.update_log(
             event="Thread parsed",
             details=f"{title} — {len(posts)} posts, {len(media_plan)} files",
         )
+        return PreparedThread(title, root, media_plan, len(posts))
 
-        had_failure = self._run_downloads(media_plan, state, root)
-        self._report_leftover_parts(root)
-        return had_failure
+    def download_prepared(
+        self, prepared: PreparedThread, selected_keys: set[str] | None = None,
+    ) -> bool:
+        """Download this queue. None means all; an empty set means none."""
+        if self._cancelled():
+            return True
+        known_keys = {media.state_key for media, _ in prepared.plan}
+        if selected_keys is not None and not selected_keys <= known_keys:
+            raise ValueError("A seleção não pertence à thread analisada.")
+        media_plan = [
+            (media, folder) for media, folder in prepared.plan
+            if selected_keys is None or media.state_key in selected_keys
+        ]
+        if not media_plan:
+            self.live_manager.update_log(
+                event="Nothing to download",
+                details=f"Nenhum arquivo selecionado em {prepared.title}",
+            )
+            return False
+        self.live_manager.add_overall_task(prepared.title, num_tasks=len(media_plan))
+        state = load_state(prepared.root)
+        had_failure = self._run_downloads(media_plan, state, prepared.root)
+        if self._cancelled():
+            self._log_cancelled()
+        self._report_leftover_parts(prepared.root)
+        return had_failure or self._cancelled()
+
+    def _cancelled(self) -> bool:
+        event = self.options.cancel_event
+        return bool(event and event.is_set())
+
+    def _download_root(self) -> Path:
+        """Return the selected GUI root or the normal CLI download root."""
+        if self.options.download_path:
+            return Path(self.options.download_path)
+        return download_root(self.options.custom_path)
+
+    def _wait_until_runnable(self) -> bool:
+        """Wait while paused and stop promptly when cancellation is requested."""
+        pause_event = self.options.pause_event
+        while pause_event is not None and not pause_event.is_set():
+            if self._cancelled():
+                return False
+            pause_event.wait(0.2)
+        return not self._cancelled()
+
+    def _log_cancelled(self) -> None:
+        self.live_manager.update_log(
+            event="Cancelled",
+            details="The operation was cancelled by the user.",
+        )
 
     def _report_leftover_parts(self, root: Path) -> None:
         """Warn about (and optionally delete) orphaned .part temp files.
@@ -169,6 +237,8 @@ class ThreadDownloader:
         pages_left = 10_000 if self.options.all_pages else max(self.options.max_pages, 1)
 
         while current and pages_left > 0:
+            if not self._wait_until_runnable():
+                break
             try:
                 response = self.client.get(current)
             except Exception as error:  # noqa: BLE001
@@ -249,17 +319,37 @@ class ThreadDownloader:
         ]
 
         for post in selected:
+            if not self._wait_until_runnable():
+                break
             matches = parse_hosts(post.html_content)
             if not matches:
                 continue
 
             posts_with_links += 1
+            # Associate each thumbnail only with its own link, not an album
+            # or an unrelated image elsewhere in the post.
+            thumbnails = {}
+            base_url = getattr(self, "thread_url", "")
+            post_soup = BeautifulSoup(post.html_content, "html.parser")
+            for anchor in post_soup.select("a[href]"):
+                image = anchor.select_one("img")
+                if image:
+                    src = image.get("data-src") or image.get("src")
+                    if src:
+                        thumbnails[urljoin(base_url, anchor["href"])] = urljoin(base_url, src)
+            for video in post_soup.select("video[poster]"):
+                sources = [video.get("src")] + [node.get("src") for node in video.select("source[src]")]
+                for source in sources:
+                    if source and video.get("poster"):
+                        thumbnails[urljoin(base_url, source)] = urljoin(base_url, video["poster"])
             destination = root
             if self.options.separate_posts and not self.options.flat:
                 destination = root / sanitize_name(post.label)
 
             for match in matches:
-                resolved = resolve(match.url, self.client)
+                if not self._wait_until_runnable():
+                    break
+                resolved = resolve(match.url, self.client, passwords=post.spoilers)
                 self.live_manager.update_log(
                     event="Resolved",
                     details=(
@@ -272,9 +362,13 @@ class ThreadDownloader:
                     unresolved_hosts += 1
 
                 for media in resolved:
+                    media.post_label = post.label
+                    media.origin_url = match.url
+                    if len(resolved) == 1 and not media.thumbnail_url:
+                        media.thumbnail_url = thumbnails.get(match.url)
                     if self.options.flat:
                         media.subfolder = ""
-                    key = media.url
+                    key = media.state_key
                     if key in seen:
                         self.live_manager.update_log(
                             event="Duplicate",
@@ -284,7 +378,9 @@ class ThreadDownloader:
                         continue
                     seen.add(key)
 
-                    if not self._passes_filters(media.filename or media.url):
+                    if media.resolver is None and not self._passes_filters(
+                        media.filename or media.url,
+                    ):
                         self.live_manager.update_log(
                             event="Filtered",
                             details=f"Excluded by --ignore/--include: {media.filename or key}",
@@ -377,14 +473,15 @@ class ThreadDownloader:
     ) -> bool:
         had_failure = False
         workers = max(1, self.options.workers)
+        ambiguous_names = self._ambiguous_state_names(state)
 
         def job(index: int, media: ResolvedMedia, folder: Path):  # noqa: ANN202
-            # A small delay between file starts keeps rate-limiting CDNs
-            # (filester, bunkr) happy when several workers run in parallel.
-            if self.options.delay:
-                time.sleep(self.options.delay * ((index % max(1, workers)) + 1))
-            cached = state.get(media.url)
-            if cached == "completed" and not self.options.dry_run:
+            if not self._wait_until_runnable():
+                return None
+
+            state_key = media.state_key
+            cached = state.get(state_key)
+            if self._cached_file_is_complete(cached, root) and not self.options.dry_run:
                 self.live_manager.update_summary(
                     TaskResult.SKIPPED,
                     SkipReason.ALREADY_DOWNLOADED,
@@ -394,36 +491,179 @@ class ThreadDownloader:
                     completed=1,
                 )
                 return None
-            return self.downloader.download(media, folder, index)
+
+            reusable = self._reuse_outcome(media, folder, root)
+            if reusable is not None:
+                return reusable, media
+
+            # A small delay between file starts keeps rate-limiting CDNs
+            # (filester, bunkr) happy when several workers run in parallel.
+            if self.options.delay:
+                wait = self.options.delay * ((index % max(1, workers)) + 1)
+                cancel_event = self.options.cancel_event
+                if cancel_event is not None:
+                    if cancel_event.wait(wait):
+                        return None
+                else:
+                    time.sleep(wait)
+            if not self._wait_until_runnable():
+                return None
+
+            refresh_attempts = 3 if media.resolver else 1
+            last_outcome: DownloadOutcome | None = None
+            current = media
+            for refresh_attempt in range(refresh_attempts):
+                if not self._wait_until_runnable():
+                    return None
+                current = refresh_media(media, self.client)
+                if current is None:
+                    last_outcome = DownloadOutcome(
+                        TaskResult.FAILED,
+                        FailReason.UNRESOLVED,
+                        message="não foi possível gerar um link temporário novo",
+                    )
+                else:
+                    if current.resolver and not self._passes_filters(
+                        current.filename or current.url,
+                    ):
+                        return None
+                    if current.filename.casefold() in ambiguous_names:
+                        current.force_unique = True
+                    mirror_path = self._redundant_mirror_path(current, root)
+                    if mirror_path is not None:
+                        self.live_manager.update_log(
+                            event="Mirror redundant",
+                            details=(
+                                f"{current.filename} — conteúdo equivalente já baixado "
+                                f"como {mirror_path.name}"
+                            ),
+                        )
+                        last_outcome = DownloadOutcome(
+                            TaskResult.SKIPPED,
+                            SkipReason.ALREADY_DOWNLOADED,
+                            path=mirror_path,
+                            message="espelho redundante já baixado",
+                        )
+                    else:
+                        last_outcome = self.downloader.download(current, folder, index)
+                        if last_outcome.result is TaskResult.FAILED:
+                            mirror_path = self._redundant_mirror_path(current, root)
+                            if mirror_path is not None:
+                                self.live_manager.update_log(
+                                    event="Mirror redundant",
+                                    details=(
+                                        f"{current.filename} — o espelho Fileditch falhou, "
+                                        f"mas o conteúdo já existe como {mirror_path.name}"
+                                    ),
+                                )
+                                last_outcome = DownloadOutcome(
+                                    TaskResult.SKIPPED,
+                                    SkipReason.ALREADY_DOWNLOADED,
+                                    path=mirror_path,
+                                    message="espelho redundante já baixado",
+                                )
+
+                if (
+                    last_outcome.result is not TaskResult.FAILED
+                    or not media.resolver
+                    or refresh_attempt >= refresh_attempts - 1
+                ):
+                    return last_outcome, current
+
+                self.live_manager.update_log(
+                    event="Refreshing link",
+                    details=(
+                        f"{current.filename or media.filename}: renovando link "
+                        f"temporário após {last_outcome.message or 'falha de rede'} "
+                        f"({refresh_attempt + 1}/{refresh_attempts - 1})"
+                    ),
+                    verbose_only=True,
+                )
+                if refresh_attempt < refresh_attempts - 1:
+                    time.sleep(0.8 * (refresh_attempt + 1))
+
+            return last_outcome, current
+
+        def stored_job(index: int, media: ResolvedMedia, folder: Path):  # noqa: ANN202
+            result = job(index, media, folder)
+            if result is None:
+                return None
+            outcome, effective_media = result
+            try:
+                outcome = self._finalize_outcome(outcome, media, root)
+            except Exception as error:  # noqa: BLE001 - a destination failure belongs to this file
+                outcome = DownloadOutcome(
+                    TaskResult.FAILED, FailReason.WRITE_ERROR, message=str(error),
+                )
+            return outcome, effective_media
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(job, index, media, folder): media
+                executor.submit(stored_job, index, media, folder): media
                 for index, (media, folder) in enumerate(plan)
             }
 
             for future in as_completed(futures):
                 media = futures[future]
                 try:
-                    outcome = future.result()
+                    result = future.result()
                 except Exception as error:  # noqa: BLE001
                     had_failure = True
                     self.live_manager.update_summary(TaskResult.FAILED, FailReason.UNRESOLVED)
+                    message = summarize_error(str(error))
                     self.live_manager.update_log(
                         event="Unexpected error",
-                        details=f"{media.url}: {error}",
+                        details=(
+                            f"{media.filename or 'arquivo sem nome'} — {message}\n"
+                            f"URL: {media.state_key}"
+                        ),
                     )
+                    state[media.state_key] = {
+                        "status": "failed",
+                        "filename": media.filename or "",
+                        "reason": FailReason.UNRESOLVED.name,
+                        "message": message,
+                    }
                     continue
 
-                if outcome is None:
+                if result is None:
                     continue
+                outcome, effective_media = result
 
                 self.live_manager.update_summary(outcome.result, outcome.reason)
-                state[media.url] = outcome.result.name.lower()
+                state_key = media.state_key
 
                 if outcome.result is TaskResult.FAILED:
                     had_failure = True
-                elif outcome.result is TaskResult.COMPLETED and outcome.path:
+                    message = self._failure_message(outcome.reason, outcome.message)
+                    state[state_key] = {
+                        "status": "failed",
+                        "filename": effective_media.filename or media.filename or "",
+                        "reason": (
+                            outcome.reason.name if outcome.reason is not None else "UNKNOWN"
+                        ),
+                        "message": message,
+                    }
+                    self.live_manager.update_log(
+                        event="Download failed",
+                        details=(
+                            f"{effective_media.filename or media.filename or 'arquivo sem nome'} "
+                            f"— {message}\nURL: {state_key}"
+                        ),
+                    )
+                elif (
+                    outcome.path
+                    and outcome.result in (TaskResult.COMPLETED, TaskResult.SKIPPED)
+                    and outcome.reason in (None, SkipReason.ALREADY_DOWNLOADED)
+                ):
+                    state[state_key] = self._completed_state(outcome.path, root)
+                else:
+                    state[state_key] = {
+                        "status": outcome.result.name.lower(),
+                        "filename": effective_media.filename or media.filename or "",
+                    }
+
+                if outcome.result is TaskResult.COMPLETED and outcome.path:
                     self.live_manager.update_log(
                         event="Downloaded",
                         details=outcome.path.name,
@@ -433,3 +673,123 @@ class ThreadDownloader:
             save_state(root, state)
 
         return had_failure
+
+    def _reuse_outcome(self, media, folder: Path, root: Path) -> DownloadOutcome | None:  # noqa: ANN001
+        """Optional platform staging recovery, before resolving a fresh URL."""
+        return None
+
+    def _finalize_outcome(self, outcome: DownloadOutcome, media, root: Path) -> DownloadOutcome:  # noqa: ANN001
+        """Platform storage commit, before counting or recording success."""
+        return outcome
+
+    @staticmethod
+    def _state_status(value: object) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            return str(value.get("status") or "")
+        return ""
+
+    @classmethod
+    def _cached_file_is_complete(cls, cached: object, root: Path) -> bool:
+        """Trust legacy completions and validate all new path-aware entries."""
+        if cached == "completed":
+            return True
+        if not isinstance(cached, dict) or cls._state_status(cached) != "completed":
+            return False
+        relative_path = cached.get("path")
+        expected_size = cached.get("size")
+        if not isinstance(relative_path, str) or not isinstance(expected_size, int):
+            return False
+        root_resolved = root.resolve()
+        candidate = (root / relative_path).resolve()
+        try:
+            candidate.relative_to(root_resolved)
+        except ValueError:
+            return False
+        return candidate.is_file() and candidate.stat().st_size == expected_size > 0
+
+    @staticmethod
+    def _completed_state(path: Path, root: Path) -> dict[str, object]:
+        return {
+            "status": "completed",
+            "path": path.resolve().relative_to(root.resolve()).as_posix(),
+            "size": path.stat().st_size,
+        }
+
+    @classmethod
+    def _ambiguous_state_names(cls, state: dict) -> set[str]:
+        """Names previously skipped/failed must get a collision-free retry path."""
+        names: set[str] = set()
+        for url, value in state.items():
+            if cls._state_status(value) not in {"failed", "skipped"}:
+                continue
+            filename = value.get("filename", "") if isinstance(value, dict) else ""
+            if not filename:
+                parsed = urlparse(str(url))
+                query = parse_qs(parsed.query)
+                filename = (query.get("n") or query.get("fn") or [""])[0]
+                if not filename:
+                    filename = unquote(Path(parsed.path).name)
+            if filename:
+                names.add(str(filename).casefold())
+        return names
+
+    @staticmethod
+    def _mirror_name_key(filename: str) -> str:
+        """Normalize cosmetic separators while preserving Unicode letters."""
+        stem = Path(unquote(filename)).stem.casefold()
+        return re.sub(r"[\W_]+", "", stem, flags=re.UNICODE)
+
+    @classmethod
+    def _mirror_names_equivalent(cls, left: str, right: str) -> bool:
+        left_key = cls._mirror_name_key(left)
+        right_key = cls._mirror_name_key(right)
+        if not left_key or not right_key:
+            return False
+        if left_key == right_key:
+            return True
+
+        common_suffix = 0
+        for left_char, right_char in zip(reversed(left_key), reversed(right_key)):
+            if left_char != right_char:
+                break
+            common_suffix += 1
+        shorter = min(len(left_key), len(right_key))
+        return common_suffix >= 24 and common_suffix / shorter >= 0.72
+
+    @classmethod
+    def _redundant_mirror_path(
+        cls,
+        media: ResolvedMedia,
+        root: Path,
+    ) -> Path | None:
+        """Find an already-downloaded equivalent for a broken Fileditch mirror."""
+        parsed = urlparse(media.source_url or media.url)
+        if (parsed.hostname or "").casefold() != "fileditchfiles.st":
+            return None
+        filename = media.filename or unquote(Path(parsed.path).name)
+        suffix = Path(filename).suffix.casefold()
+        if not suffix:
+            return None
+        for candidate in root.rglob(f"*{suffix}"):
+            try:
+                if (
+                    candidate.is_file()
+                    and candidate.stat().st_size > 0
+                    and cls._mirror_names_equivalent(filename, candidate.name)
+                ):
+                    return candidate
+            except OSError:
+                continue
+        return None
+
+    @staticmethod
+    def _failure_message(reason, raw_message: str) -> str:  # noqa: ANN001
+        if reason is FailReason.WRITE_ERROR:
+            return f"erro ao gravar no disco: {raw_message or 'motivo desconhecido'}"
+        if reason is FailReason.UNRESOLVED:
+            return raw_message or "não foi possível renovar ou resolver o link"
+        if reason in (FailReason.HTTP_ERROR, FailReason.NETWORK_ERROR):
+            return summarize_error(raw_message)
+        return summarize_error(raw_message) if raw_message else "falha desconhecida"

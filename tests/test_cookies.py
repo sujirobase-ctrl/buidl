@@ -21,7 +21,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-PROJECT = Path(r"C:\Users\isaac\Downloads\buidl")
+PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
 
 from bs4 import BeautifulSoup  # noqa: E402

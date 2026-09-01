@@ -1,40 +1,95 @@
-"""Regression guard: goonbox.cr resolver + HOSTS entry (mirrors ForumPostDownloader).
+"""Offline regression tests for the Goonbox resolver."""
 
-Not the suite. Exercises the new _resolve_goodbox against the live API and the
-HOSTS matcher in parse_hosts. Mocks nothing (real HTTP + cookies).
-"""
-import sys
-sys.path.insert(0, r"C:\Users\isaac\Downloads\buidl")
+from __future__ import annotations
 
-from src.http_client import HttpClient
-from src.resolvers import resolve
+from bs4 import BeautifulSoup
+
 from src.parsers.host_parser import parse_hosts
+from src.resolvers import _resolve_goodbox
 
-res = []
-c = HttpClient(cookies_file=r"C:\Users\isaac\Downloads\cookies.txt")
-REAL = "aVhBYYe"  # confirmed live goonbox img id from the nene thread
 
-# HOSTS matcher
-html = f'<a href="https://goonbox.cr/img/{REAL}">x</a>'
-m = parse_hosts(html)
-assert any("goonbox.cr" in x.url for x in m), "goonbox.cr not matched"
-res.append("HOSTS: goonbox.cr/img/<id> detected by parse_hosts")
+class _Response:
+    def __init__(self, *, status=200, payload=None, text=""):
+        self.status_code = status
+        self._payload = payload or {}
+        self.text = text
 
-# resolver -> real image url on cuckcapital.cr
-out = resolve(f"https://goonbox.cr/img/{REAL}", c)
-assert len(out) == 1, out
-assert ".jpg" in out[0].url or ".png" in out[0].url, out[0].url
-res.append(f"resolver: {out[0].filename} -> {out[0].url[:60]}...")
+    def json(self):
+        return self._payload
 
-# album form
-out2 = resolve("https://goonbox.cr/a/someSlug", c)
-res.append(f"album form accepted (returns list, len={len(out2)})")
+    def close(self):
+        return None
 
-# bad id -> [] (safe)
-assert resolve("https://goonbox.cr/img/zzz_nope", c) == []
-res.append("unknown id -> [] (no exception)")
 
-print("GOONBOX tests — passed:")
-for r in res:
-    print("  OK", r)
-print(f"({len(res)} checks)")
+class _Session:
+    def __init__(self, payloads):
+        self.payloads = payloads
+
+    def get(self, url, **_kwargs):
+        if "/api/" in url:
+            payload = self.payloads.get(url)
+            return _Response(status=200 if payload is not None else 403, payload=payload)
+        return _Response(status=206)
+
+    def head(self, _url, **_kwargs):
+        return _Response(status=405)
+
+
+class _Client:
+    timeout = 30
+
+    def __init__(self, payloads, html=""):
+        self.session = _Session(payloads)
+        self.html = html
+
+    def get_soup(self, _url, **_kwargs):
+        return BeautifulSoup(self.html, "html.parser")
+
+
+def test_host_matcher_accepts_image_and_album():
+    html = (
+        '<a href="https://goonbox.cr/img/aVhBYYe">image</a>'
+        '<a href="https://goonbox.cr/a/albumSlug">album</a>'
+    )
+    matches = parse_hosts(html)
+    assert len([match for match in matches if "goonbox.cr" in match.url]) == 2
+
+
+def test_nested_original_url_and_probe_fallback():
+    page = '<meta property="og:image" content="https://cdn.cr/thumb.md.jpg">'
+    client = _Client(
+        {
+            "https://goonbox.cr/api/images/aVhBYYe": {
+                "data": {"image": {"assets": {"originalUrl": "https://cdn.cr/original.jpg"}}}
+            }
+        },
+        page,
+    )
+    out = _resolve_goodbox("https://goonbox.cr/img/aVhBYYe", client)
+    assert len(out) == 1
+    assert out[0].url == "https://cdn.cr/original.jpg"
+
+
+def test_cloudflare_api_failure_returns_embedded_thumbnail():
+    page = '<meta property="og:image" content="https://cdn.cr/thumb.md.jpg">'
+    client = _Client({}, page)
+    out = _resolve_goodbox("https://goonbox.cr/img/blocked", client)
+    assert len(out) == 1
+    assert out[0].url == "https://cdn.cr/thumb.md.jpg"
+
+
+def test_album_paginates():
+    client = _Client(
+        {
+            "https://goonbox.cr/api/albums/demo/images?page=1": {
+                "images": [{"original_url": "https://cdn.cr/one.jpg"}],
+                "pagination": {"last_page": 2},
+            },
+            "https://goonbox.cr/api/albums/demo/images?page=2": {
+                "images": [{"original_url": "https://cdn.cr/two.jpg"}],
+                "pagination": {"last_page": 2},
+            },
+        },
+    )
+    out = _resolve_goodbox("https://goonbox.cr/a/demo", client)
+    assert [item.url for item in out] == ["https://cdn.cr/one.jpg", "https://cdn.cr/two.jpg"]

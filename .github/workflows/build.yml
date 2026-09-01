@@ -1,69 +1,130 @@
-name: Build buidl (exe + wheel)
+name: Build and release BUIDL
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt pytest
+      - name: Run offline test suite
+        run: python -m pytest tests --ignore=tests/test_e2e.py -q
+
+  windows:
+    name: Windows executables and wheel
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Install dependencies
+          python-version: "3.14"
+          cache: pip
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt build
+      - name: Build the three executables
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install build
-
-      - name: Build wheel
+          pyinstaller --clean --noconfirm buidl.spec
+          pyinstaller --clean --noconfirm buidl-batch.spec
+          pyinstaller --clean --noconfirm buidl-gui.spec
+      - name: Build Python wheel
         run: python -m build --wheel
-
-      - name: Build exe (PyInstaller)
-        run: pyinstaller --onefile --name buidl --paths src downloader.py
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+      - name: Collect Windows artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item dist/buidl.exe release/buidl-cli.exe
+          Copy-Item dist/buidl-batch.exe release/buidl-batch.exe
+          Copy-Item dist/buidl-gui.exe release/buidl-gui.exe
+          Copy-Item dist/*.whl release/
+          Compress-Archive release/*.exe release/BUIDL-Windows-portable.zip
+          Get-ChildItem release -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content release/SHA256SUMS-windows.txt
+      - uses: actions/upload-artifact@v4
         with:
-          name: buidl-dist
-          path: |
-            dist/buidl.exe
-            dist/*.whl
+          name: BUIDL-Windows
+          path: release/*
           if-no-files-found: error
 
-      # ---- Continuous release on every push to main ----
-      - name: Publish continuous release (push to main)
-        if: github.ref == 'refs/heads/main'
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gradle/actions/wrapper-validation@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK components
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Build debug APK
+        working-directory: android
         env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
+          CHAQUOPY_PYTHON: ${{ env.pythonLocation }}/bin/python
         run: |
-          gh release delete continuous --yes || true
-          gh release create continuous \
-            --prerelease \
-            --title "continuous (latest from main)" \
-            --notes "Automated build from the latest commit on main. Exe + wheel attached." \
-            dist/buidl.exe dist/*.whl
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+      - name: Collect Android artifact
+        run: |
+          mkdir release
+          cp android/app/build/outputs/apk/debug/app-debug.apk release/BUIDL-android.apk
+          cd release
+          sha256sum BUIDL-android.apk > SHA256SUMS-android.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BUIDL-Android
+          path: release/*
+          if-no-files-found: error
 
-      # ---- Versioned release on tag v* ----
-      - name: Publish versioned release (tag)
-        if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [tests, windows, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches project version
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          test "${GITHUB_REF_NAME}" = "v${version}"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: BUIDL-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create combined checksum file
+        working-directory: release-assets
+        run: sha256sum BUIDL-android.apk BUIDL-Windows-portable.zip buidl-cli.exe buidl-batch.exe buidl-gui.exe *.whl > SHA256SUMS.txt
+      - name: Create versioned release
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            dist/buidl.exe dist/*.whl
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --generate-notes --title "BUIDL $GITHUB_REF_NAME"

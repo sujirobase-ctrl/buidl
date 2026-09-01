@@ -1,5 +1,6 @@
 # Secrets / credentials — NEVER commit
 cookies.txt
+**/cookies.txt
 *.cookies
 
 # Downloaded content (runtime artifact, not source)
@@ -18,7 +19,13 @@ buidl.egg-info/
 # Build / packaging outputs
 dist/
 build/
+/build-*/
+/dist-*/
+/dist-*.zip
 *.spec
+!buidl.spec
+!buidl-batch.spec
+!buidl-gui.spec
 
 # Test cache
 .pytest_cache/

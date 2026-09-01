@@ -12,6 +12,7 @@ from rich.table import Table
 from rich.text import Text
 
 from src.config import LOG_COLORS, MAX_LOG_ROWS, SESSION_LOG
+from src.file_utils import redact_sensitive_urls
 
 
 class LoggerTable:
@@ -50,6 +51,7 @@ class LoggerTable:
         if verbose_only and not self.verbose:
             return False
 
+        details = redact_sensitive_urls(details)
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.events.append((timestamp, event, details))
         self._write_to_file(timestamp, event, details)

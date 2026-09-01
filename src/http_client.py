@@ -9,7 +9,7 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-from src.config import HTTP_TIMEOUT, RETRY_BACKOFF, USER_AGENT, RATE_429_BACKOFF
+from src.config import HTTP_TIMEOUT, RATE_429_BACKOFF, RETRY_BACKOFF, USER_AGENT
 
 
 def _consume_retry_after(response: requests.Response | None) -> bool:

@@ -6,16 +6,16 @@ non-empty, and re-fetched when empty/partial.
 """
 from __future__ import annotations
 
-import sys
 import os
+import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.config import SkipReason, TaskResult
 from src.downloaders.media_downloader import MediaDownloader
-from src.resolvers import ResolvedMedia
 from src.http_client import HttpClient
-from src.config import TaskResult, SkipReason
+from src.resolvers import ResolvedMedia, _resolve_direct
 
 
 class _FakeLive:
@@ -73,14 +73,11 @@ def test_existing_empty_is_redownloaded():
 
 def test_resume_appends_to_partial_part():
     """A .part left by a killed run should be resumed, not restarted."""
-    dl = _make_downloader()
     d = Path(__file__).parent / "_tmp_skip"
     d.mkdir(exist_ok=True)
     target = d / "song.mp3"
     part = target.with_suffix(target.suffix + ".part")
     part.write_bytes(b"0123")  # 4 of 10 bytes already downloaded
-
-    seen = {}
 
     class _FakeRespResume:
         def __enter__(self): return self
@@ -111,6 +108,90 @@ def test_resume_appends_to_partial_part():
     assert target.read_bytes() == b"0123456789", target.read_bytes()
     assert not part.exists(), "stale .part should be gone"
     target.unlink()
+
+
+def test_reddit_html_interstitial_is_retried(tmp_path, monkeypatch):
+    class _Response:
+        status_code = 200
+
+        def __init__(self, content_type, body):
+            self._content_type = content_type
+            self._body = body
+
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def raise_for_status(self): pass
+
+        @property
+        def headers(self):
+            return {
+                "Content-Type": self._content_type,
+                "Content-Length": str(len(self._body)),
+            }
+
+        def iter_content(self, chunk_size=1):
+            yield self._body
+
+    responses = iter(
+        [
+            _Response("text/html; charset=utf-8", b"temporary block"),
+            _Response("image/jpeg", b"jpeg bytes"),
+        ]
+    )
+    client = HttpClient()
+    client.session.get = lambda *a, **k: next(responses)
+    downloader = MediaDownloader(client, live_manager=_FakeLive(), max_retries=1)
+    media = _resolve_direct("https://i.redd.it/drfy08tqb89g1.jpeg", client)[0]
+    monkeypatch.setattr("src.downloaders.media_downloader.time.sleep", lambda _seconds: None)
+
+    outcome = downloader.download(media, tmp_path)
+
+    assert outcome.result is TaskResult.COMPLETED
+    assert (tmp_path / "Photos" / "drfy08tqb89g1.jpeg").read_bytes() == b"jpeg bytes"
+
+
+def test_resume_restarts_when_server_ignores_range():
+    dl = _make_downloader()
+    d = Path(__file__).parent / "_tmp_skip"
+    d.mkdir(exist_ok=True)
+    target = d / "song.mp3"
+    part = target.with_suffix(target.suffix + ".part")
+    part.write_bytes(b"0123")
+
+    out = dl._attempt(
+        ResolvedMedia(url="http://x/song.mp3", filename="song.mp3"),
+        d,
+        {},
+        0,
+    )
+
+    assert out.result is TaskResult.COMPLETED
+    assert target.read_bytes() == b"0123456789"
+    target.unlink()
+
+
+def test_same_filename_from_two_urls_gets_unique_targets():
+    dl = _make_downloader()
+    d = Path(__file__).parent / "_tmp_skip"
+    d.mkdir(exist_ok=True)
+    first = d / "song.mp3"
+    second = d / "song (1).mp3"
+    first.unlink(missing_ok=True)
+    second.unlink(missing_ok=True)
+
+    one = dl._attempt(
+        ResolvedMedia(url="http://x/one", filename="song.mp3"), d, {}, 0,
+    )
+    two = dl._attempt(
+        ResolvedMedia(url="http://x/two", filename="song.mp3"), d, {}, 1,
+    )
+
+    assert one.result is TaskResult.COMPLETED
+    assert two.result is TaskResult.COMPLETED
+    assert first.read_bytes() == b"0123456789"
+    assert second.read_bytes() == b"0123456789"
+    first.unlink()
+    second.unlink()
 
 
 if __name__ == "__main__":
