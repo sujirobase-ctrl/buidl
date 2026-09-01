@@ -90,7 +90,7 @@ PAGE1_HTML = """
 
 
 def test_title_and_post_count():
-    soup = BeautifulSoup(PAGE1_HTML, "lxml")
+    soup = BeautifulSoup(PAGE1_HTML, "html.parser")
     parser = ThreadParser(soup, BASE)
     assert parser.parse_title() == "Request Patreon Twitch Ikumi (ASMR)"
     posts = parser.parse_posts()
@@ -103,7 +103,7 @@ def test_decorative_profile_banner_excluded():
     assert _is_decorative(
         "https://simp4.cuckcapital.cr/e778c5e2-66d6-4ffe-9a51-77fd1d24b03b-profile_banner-480.md.png"
     )
-    soup = BeautifulSoup(PAGE1_HTML, "lxml")
+    soup = BeautifulSoup(PAGE1_HTML, "html.parser")
     parser = ThreadParser(soup, BASE)
     posts = parser.parse_posts()
     post1 = posts[0]
@@ -114,7 +114,7 @@ def test_decorative_profile_banner_excluded():
 
 
 def test_emoji_signature_quote_excluded():
-    soup = BeautifulSoup(PAGE1_HTML, "lxml")
+    soup = BeautifulSoup(PAGE1_HTML, "html.parser")
     parser = ThreadParser(soup, BASE)
     posts = parser.parse_posts()
     # post 9 already has a signature; ensure it contributes no media on its own
@@ -127,7 +127,7 @@ def test_emoji_signature_quote_excluded():
 
 
 def test_user_posted_folders_captured():
-    soup = BeautifulSoup(PAGE1_HTML, "lxml")
+    soup = BeautifulSoup(PAGE1_HTML, "html.parser")
     parser = ThreadParser(soup, BASE)
     posts = {p.post_number: p for p in parser.parse_posts()}
 
@@ -149,7 +149,7 @@ def test_user_posted_folders_captured():
 
 
 def test_total_capture_count():
-    soup = BeautifulSoup(PAGE1_HTML, "lxml")
+    soup = BeautifulSoup(PAGE1_HTML, "html.parser")
     parser = ThreadParser(soup, BASE)
     total = 0
     for p in parser.parse_posts():

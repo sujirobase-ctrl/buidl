@@ -121,7 +121,7 @@ def drive(answers: list[str], *, required: bool = False) -> tuple[str | None, st
 
 
 def wall(html: str) -> bool:
-    return looks_like_login_wall(BeautifulSoup(html, "lxml"))
+    return looks_like_login_wall(BeautifulSoup(html, "html.parser"))
 
 
 def main() -> int:
