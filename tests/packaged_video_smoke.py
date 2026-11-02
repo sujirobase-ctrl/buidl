@@ -31,7 +31,8 @@ def run(executable):
     executable = executable.resolve(strict=True)
     archive = CArchiveReader(str(executable))
     pyz = archive.open_embedded_archive("PYZ.pyz")
-    assert "src.video_preview" in pyz.toc and "src.video_preview_gui" in pyz.toc
+    assert "src.video_preview" in pyz.toc
+    assert "src.preview_qt" in pyz.toc or "src.video_preview_gui" in pyz.toc
     with TemporaryDirectory(prefix="packaged-video-", dir=executable.parent.parent / "build") as folder:
         bundle = Path(folder)
 

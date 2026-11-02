@@ -2,6 +2,11 @@
 
 ## BUIDL 2.0.0 — GUI e CLI
 
+A versão 2.0 promove a interface Windows e o aplicativo Android da linha 1.4.5.
+O APK usa telas nativas Android (Java Views); a captura de cookies continua
+disponível no navegador interno. A release contém somente `BUIDL-gui.exe` e
+`BUIDL-android.apk`.
+
 Abra `buidl-gui.exe` (ou execute `python gui.py`), informe a URL da thread,
 os cookies quando necessários e a pasta de destino.
 

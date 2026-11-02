@@ -4,7 +4,9 @@ import android.content.Context;
 import android.content.ContentResolver;
 import android.content.UriPermission;
 import android.database.Cursor;
+import android.media.MediaScannerConnection;
 import android.net.Uri;
+import android.os.Environment;
 import android.provider.DocumentsContract;
 import org.json.JSONObject;
 import java.io.File;
@@ -13,6 +15,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.IOException;
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.UUID;
 
 /** Storage Access Framework bridge. Only newly-created documents are written. */
@@ -21,6 +24,7 @@ public class DestinationStorage {
     private final ContentResolver resolver;
     private final File stagingRoot;
     private final HashSet<String> uncommitted = new HashSet<>();
+    private final HashMap<String,String> uncommittedMime = new HashMap<>();
     private static final String DIR = DocumentsContract.Document.MIME_TYPE_DIR;
     private static final String[] COLUMNS = {
         DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
@@ -143,6 +147,7 @@ public class DestinationStorage {
             created=renamed; JSONObject finished=info(created);
             if(finished==null || size(created,finished)!=expected)throw new IOException("O destino não confirmou o arquivo completo.");
             uncommitted.add(created.toString());
+            uncommittedMime.put(created.toString(),mime);
             return new JSONObject().put("uri",created.toString()).put("size",expected).put("name",finished.getString("name"))
                     .put("relative",actual+finished.getString("name")).toString();
         } catch(Exception error) {
@@ -156,7 +161,26 @@ public class DestinationStorage {
         try {
             DocumentsContract.deleteDocument(resolver,checkedDocument(treeValue,uriValue));
             uncommitted.remove(uriValue);
+            uncommittedMime.remove(uriValue);
         } catch(Exception e) { throw new IOException("Não foi possível remover a cópia da gravação interrompida."); }
     }
-    public synchronized void commit(String uriValue) { uncommitted.remove(uriValue); }
+    public synchronized void commit(String uriValue) {
+        uncommitted.remove(uriValue);
+        String mime=uncommittedMime.remove(uriValue);
+        if(mime==null)return;
+        Uri uri=Uri.parse(uriValue);
+        resolver.notifyChange(uri,null);
+        if(!(mime.startsWith("image/")||mime.startsWith("video/")||mime.startsWith("audio/")))return;
+        // ExternalStorageProvider usually indexes created documents itself. An
+        // explicit scan makes the new media visible promptly in gallery apps.
+        if("com.android.externalstorage.documents".equals(uri.getAuthority()))try {
+            String id=DocumentsContract.getDocumentId(uri);
+            if(id.startsWith("primary:")) {
+                File external=Environment.getExternalStorageDirectory().getCanonicalFile();
+                File file=new File(external,id.substring(8)).getCanonicalFile();
+                if(file.getPath().startsWith(external.getPath()+File.separator))
+                    MediaScannerConnection.scanFile(context,new String[]{file.getPath()},new String[]{mime},null);
+            }
+        } catch(Exception ignored) { }
+    }
 }

@@ -14,7 +14,7 @@ from pathlib import Path
 _configured_adb = os.environ.get("ANDROID_ADB")
 _sdk_adb = Path(os.environ.get("ANDROID_HOME", "")) / "platform-tools" / "adb.exe"
 ADB = Path(_configured_adb or shutil.which("adb") or (_sdk_adb if _sdk_adb.is_file() else "adb"))
-SERIAL = "emulator-5554"
+SERIAL = os.environ.get("ANDROID_SERIAL", "emulator-5554")
 QA = Path(__file__).parent / "qa"
 
 

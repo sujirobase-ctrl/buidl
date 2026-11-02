@@ -1,0 +1,23 @@
+BUIDL — pasta unica do projeto
+
+Todos os arquivos estao reunidos em:
+C:/buidlNEW/buidl/buidl
+
+src, android, windows-dotnet e os arquivos da raiz: codigo e configuracoes.
+build e dist: saidas da compilacao atual.
+Arquivo-BUIDL: builds, distribuicoes e releases antigos.
+Correcoes: entregas de correcoes separadas por versao e descricao.
+Correcoes/README.md: regras para colocar cada arquivo na pasta certa.
+
+Nova interface 1.4.5 (ícone personalizado):
+Correcoes/BUIDL-1.4.5-Icone/Windows/BUIDL-1.4.5.exe
+
+Para executar a interface classica corrigida:
+Correcoes/BUIDL-1.3.0-HTTPS-Destino/Windows/BUIDL-GUI.exe
+
+ORGANIZACAO.md explica a estrutura.
+Arquivo-BUIDL/Mapa-de-organizacao.json registra os arquivos movidos.
+Nenhum arquivo foi apagado. O repositorio Git manteve seu caminho.
+
+APK Android 1.4.5: Correcoes/BUIDL-1.4.5-Android/Android/BUIDL-1.4.5-Android.apk
+Fontes e testes da versão Android ficam na mesma pasta de entrega.

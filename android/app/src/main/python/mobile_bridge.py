@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import mimetypes
 import os
 import re
 import tempfile
@@ -141,7 +140,7 @@ class Engine:
                                    cookies=self.cookie_path.is_file(), logs=list(self.logs),
                                    errors=list(self.errors), output=str(self.download_dir),
                                    destination=self.destination.get("uri", ""),
-                                   destination_label=self.destination.get("label", "Pasta do aplicativo")), ensure_ascii=False)
+                                   destination_label=self.destination.get("label", "Nenhuma pasta selecionada")), ensure_ascii=False)
 
     def set_destination(self, uri):
         with self.lock:
@@ -253,13 +252,14 @@ class Engine:
         self._begin("downloading", "Baixando arquivos…", action)
 
     def _download(self, downloader, selected):
+        if not self.destination.get("uri"):
+            raise ValueError("Escolha uma pasta de destino para iniciar o download.")
         with self.lock:
             self.state, self.message = "downloading", "Baixando arquivos…"
-        if self.destination.get("uri"):
-            if self.storage_backend is None:
-                raise ValueError("A pasta de destino está indisponível. Escolha a pasta novamente.")
-            storage = Destination(self.private_dir, self.destination["uri"], self.storage_backend)
-            downloader = DestinationDownloader(downloader.client, self.manager, downloader.options, storage)
+        if self.storage_backend is None:
+            raise ValueError("A pasta de destino está indisponível. Escolha a pasta novamente.")
+        storage = Destination(self.private_dir, self.destination["uri"], self.storage_backend)
+        downloader = DestinationDownloader(downloader.client, self.manager, downloader.options, storage)
         failed = downloader.download_prepared(self.prepared, selected)
         with self.lock:
             self.state = "failed" if failed else "done"
@@ -394,12 +394,4 @@ class Engine:
                 raise ValueError("Escolha a pasta de destino novamente.")
             storage = Destination(self.private_dir, self.destination["uri"], self.storage_backend)
             return json.dumps(sorted(storage.files(), key=lambda item: item["relative"]), ensure_ascii=False)
-        result = []
-        for path in self.download_dir.rglob("*"):
-            if path.is_file() and not path.name.startswith(".") and not path.name.endswith((".part", ".tmp", ".part.json")):
-                resolved = path.resolve()
-                if not resolved.is_relative_to(self.download_dir.resolve()):
-                    continue
-                result.append(dict(path=str(resolved), name=path.name, relative=str(path.relative_to(self.download_dir)),
-                                   size=path.stat().st_size, mime=mimetypes.guess_type(path.name)[0] or "application/octet-stream"))
-        return json.dumps(sorted(result, key=lambda item: item["relative"]), ensure_ascii=False)
+        return "[]"

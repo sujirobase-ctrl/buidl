@@ -20,6 +20,13 @@ ACCENT = "#6C63FF"
 SURFACE = "#151823"
 MUTED = "#9CA5BD"
 PAGE_SIZE = 18
+KIND_FILTERS = (
+    ("Todos", "Todos"),
+    ("Imagens", "Só fotos"),
+    ("Vídeos", "Só vídeos"),
+    ("Áudios", "Áudios"),
+    ("Arquivos", "Outros"),
+)
 
 
 class PreviewWindow(ctk.CTkToplevel):
@@ -82,23 +89,31 @@ class PreviewWindow(ctk.CTkToplevel):
         ctk.CTkLabel(
             filters, text="Buscar nome, post ou host", text_color=MUTED, height=20, anchor="w",
         ).grid(row=0, column=0, sticky="ew")
-        ctk.CTkLabel(
-            filters, text="Tipo de arquivo", text_color=MUTED, height=20, anchor="w",
-        ).grid(row=0, column=1, sticky="w")
         self.search_entry = ctk.CTkEntry(
             filters, textvariable=self.query, placeholder_text="Buscar nome, post ou host…", height=34,
         )
-        self.search_entry.grid(row=1, column=0, padx=(0, 10), sticky="ew")
+        self.search_entry.grid(row=1, column=0, sticky="ew")
         if on_refresh is not None:
             self.refresh_button = ctk.CTkButton(
                 filters, text="Atualizar thread", width=130, fg_color="#353052",
                 command=self._refresh,
             )
-            self.refresh_button.grid(row=1, column=2, padx=(10, 0))
-        ctk.CTkOptionMenu(
-            filters, variable=self.kind, values=["Todos", "Imagens", "Vídeos", "Áudios", "Arquivos"],
-            command=lambda _value: self._filter_changed(), fg_color="#252A3D",
-        ).grid(row=1, column=1)
+            self.refresh_button.grid(row=1, column=1, padx=(10, 0))
+
+        type_filters = ctk.CTkFrame(filters, fg_color="transparent")
+        type_filters.grid(row=2, column=0, columnspan=2, pady=(10, 0), sticky="ew")
+        type_filters.grid_columnconfigure(5, weight=1)
+        ctk.CTkLabel(
+            type_filters, text="Mostrar:", text_color=MUTED, height=30, anchor="w",
+        ).grid(row=0, column=0, padx=(0, 8))
+        self.kind_buttons = {}
+        for column, (kind, label) in enumerate(KIND_FILTERS, start=1):
+            button = ctk.CTkButton(
+                type_filters, text=label, width=96, height=30,
+                command=lambda value=kind: self._set_kind(value),
+            )
+            button.grid(row=0, column=column, padx=(0, 6), sticky="w")
+            self.kind_buttons[kind] = button
         self.query.trace_add("write", self._search_changed)
 
         selection = ctk.CTkFrame(self, fg_color="transparent")
@@ -146,14 +161,19 @@ class PreviewWindow(ctk.CTkToplevel):
             actions, text="Voltar sem baixar", width=150, fg_color="#252A3D", command=self._cancel,
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkButton(
-            actions, text=f"Baixar todos ({len(prepared.plan)})", width=165,
+            actions, text=f"Baixar tudo ({len(prepared.plan)})", width=155,
             fg_color="#353052", command=lambda: self._confirm(True),
         ).grid(row=0, column=1, padx=10)
-        self.selected_button = ctk.CTkButton(
-            actions, text="Baixar selecionados", width=200, height=38,
-            fg_color=ACCENT, command=lambda: self._confirm(False),
+        self.filtered_button = ctk.CTkButton(
+            actions, text="Baixar resultados do filtro", width=210, height=38,
+            fg_color=ACCENT, command=self._confirm_filtered,
         )
-        self.selected_button.grid(row=0, column=2)
+        self.filtered_button.grid(row=0, column=2)
+        self.selected_button = ctk.CTkButton(
+            actions, text="Baixar selecionados", width=195, height=38,
+            fg_color="#353052", command=lambda: self._confirm(False),
+        )
+        self.selected_button.grid(row=0, column=3, padx=(10, 0))
         self._render_page()
         self.restore_timer = self.after(100, self._restore_scroll)
         self.poll_timer = self.after(80, self._poll)
@@ -170,6 +190,19 @@ class PreviewWindow(ctk.CTkToplevel):
         if self.search_timer:
             self.after_cancel(self.search_timer)
         self.search_timer = self.after(250, self._filter_changed)
+
+    def _set_kind(self, kind):
+        self.kind.set(kind)
+        self._filter_changed()
+
+    def _update_kind_buttons(self):
+        active = self.kind.get()
+        for kind, button in self.kind_buttons.items():
+            selected = kind == active
+            button.configure(
+                fg_color=ACCENT if selected else "#252A3D",
+                hover_color="#817AFF" if selected else "#353B52",
+            )
 
     def _filter_changed(self):
         self.search_timer = None
@@ -192,10 +225,15 @@ class PreviewWindow(ctk.CTkToplevel):
 
     def _update_selection(self):
         count = len(self.model.selected)
-        visible = {self.model.items[i].state_key for i in self._filtered()}
+        filtered = self._filtered()
+        visible = {self.model.items[i].state_key for i in filtered}
         hidden = count - len(self.model.selected & visible)
         self.selection_label.configure(
             text=f"{count} selecionados" + (f" · {hidden} fora do filtro" if hidden else ""),
+        )
+        self.filtered_button.configure(
+            text=f"Baixar resultados do filtro ({len(filtered)})",
+            state="normal" if filtered else "disabled",
         )
         self.selected_button.configure(
             text=f"Baixar selecionados ({count})", state="normal" if count else "disabled",
@@ -213,6 +251,7 @@ class PreviewWindow(ctk.CTkToplevel):
         self.labels.clear()
         self.variables.clear()
         self.images.clear()
+        self._update_kind_buttons()
         indices = self._filtered()
         pages = max(1, math.ceil(len(indices) / PAGE_SIZE))
         self.page = max(0, min(self.page, pages - 1))
@@ -341,6 +380,13 @@ class PreviewWindow(ctk.CTkToplevel):
     def _confirm(self, all_files):
         keys = None if all_files else set(self.model.selected)
         if keys is not None and not keys:
+            return
+        self.close()
+        self.on_confirm(keys)
+
+    def _confirm_filtered(self):
+        keys = {self.model.items[index].state_key for index in self._filtered()}
+        if not keys:
             return
         self.close()
         self.on_confirm(keys)

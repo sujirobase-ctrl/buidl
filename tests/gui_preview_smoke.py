@@ -87,8 +87,10 @@ def run():
         dialog._change_page(-1)
         assert dialog.variables[0].get()
         assert len(dialog.model.selected) == 2
-        dialog.kind.set("Vídeos")
-        dialog._filter_changed()
+        assert set(dialog.kind_buttons) == {"Todos", "Imagens", "Vídeos", "Áudios", "Arquivos"}
+        dialog.kind_buttons["Vídeos"].invoke()
+        pump(app)
+        assert dialog.kind.get() == "Vídeos"
         assert dialog._filtered() == [24]
         assert len(dialog.model.selected) == 2
         video_requests = []
@@ -108,7 +110,7 @@ def run():
         paused = player.frame_index
         pump(app, 0.3)
         assert not player.playing and player.frame_index == paused
-        snapshot(player, ROOT / "build" / "qa-video-1.3.0.png")
+        snapshot(player, ROOT / "build" / "qa-video-1.3.1.png")
         player._toggle()
         pump(app, 0.2)
         assert player.frame_index != paused
@@ -156,10 +158,26 @@ def run():
         dialog.kind.set("Todos")
         dialog._filter_changed()
         pump(app)
-        shot = ROOT / "build" / "qa-preview-1.3.0.png"
+        dialog.geometry("920x650+30+30")
+        pump(app)
+        right_edge = dialog.winfo_rootx() + dialog.winfo_width()
+        bottom_edge = dialog.winfo_rooty() + dialog.winfo_height()
+        for button in (*dialog.kind_buttons.values(), dialog.filtered_button, dialog.selected_button):
+            assert button.winfo_rootx() + button.winfo_width() <= right_edge
+            assert button.winfo_rooty() + button.winfo_height() <= bottom_edge
+        shot = ROOT / "build" / "qa-preview-1.3.1.png"
         snapshot(dialog, shot)
         dialog._confirm(False)
         assert decisions == [{items[0].state_key, items[20].state_key}]
+
+        # A type/search filter can be downloaded directly without manually
+        # selecting every matching card.
+        dialog = preview_gui.PreviewWindow(app, prepared, None, decisions.append, lambda: None)
+        dialog.kind_buttons["Vídeos"].invoke()
+        pump(app)
+        assert dialog.filtered_button.cget("text") == "Baixar resultados do filtro (1)"
+        dialog.filtered_button.invoke()
+        assert decisions[-1] == {items[24].state_key}
 
         def unexpected_fetch(*_args):
             raise AssertionError("cached thumbnail was fetched again")
@@ -228,7 +246,7 @@ def run():
         assert app.start_button.winfo_rootx() + app.start_button.winfo_width() <= app.winfo_rootx() + app.winfo_width()
         metrics = app.failure_button.master
         assert app.failure_button.winfo_rooty() + app.failure_button.winfo_height() <= metrics.winfo_rooty() + metrics.winfo_height()
-        snapshot(app, ROOT / "build" / "qa-main-1.3.0.png")
+        snapshot(app, ROOT / "build" / "qa-main-1.3.1.png")
         print("GUI SMOKE PASS: video play/pause/cache/cover/cancel, selection, two downloads/one scan, layout")
         print(f"Screenshot: {shot}")
     finally:

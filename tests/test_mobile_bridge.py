@@ -66,7 +66,7 @@ def server():
 
 def test_mobile_selection_cache_failures_and_resume(tmp_path, server):
     base, requests = server
-    engine = mobile.Engine(str(tmp_path / "private"), str(tmp_path / "downloads"))
+    engine, storage = destination_engine(tmp_path)
     settings = json.dumps({"url": base + "/threads/1", "workers": 1})
     engine.scan(settings)
     assert wait(engine)["state"] == "ready"
@@ -281,9 +281,25 @@ def test_destination_change_preserves_gallery_and_keeps_old_files(tmp_path, serv
     assert wait(engine)["skipped"] == 1
     engine.set_destination("")
     engine.download(1, "[0]")
-    assert wait(engine)["completed"] == 1
-    assert json.loads(engine.files())[0]["path"].endswith("one.jpg")
+    result = wait(engine)
+    assert result["state"] == "error" and result["completed"] == 0
+    assert "pasta de destino" in result["message"]
+    assert json.loads(engine.files()) == []
     assert storage.published == 2
+
+
+def test_download_without_destination_never_uses_private_app_folder(tmp_path, server):
+    base, requests = server
+    engine = mobile.Engine(str(tmp_path / "private"), str(tmp_path / "downloads"))
+    engine.scan(json.dumps({"url": base + "/threads/1", "workers": 1}))
+    assert wait(engine)["state"] == "ready"
+    engine.download(1, "[0]")
+    result = wait(engine)
+    assert result["state"] == "error" and result["completed"] == 0
+    assert "pasta de destino" in result["message"]
+    assert requests == ["/threads/1"]
+    assert not list(engine.download_dir.iterdir())
+    assert json.loads(engine.files()) == []
 
 
 def test_destination_write_failure_is_failed_and_retry_reuses_staging(tmp_path, server):
