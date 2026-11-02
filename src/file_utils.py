@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 from contextlib import suppress
@@ -138,13 +139,31 @@ def write_urls_file(urls: list[str], path: str = URLS_FILE) -> None:
 def load_state(folder: Path) -> dict:
     """Load the per-folder resume sidecar."""
     state_file = folder / STATE_FILENAME
-    if not state_file.exists():
-        return {}
     try:
         state = json.loads(state_file.read_text(encoding="utf-8"))
-        return state if isinstance(state, dict) else {}
+        state = state if isinstance(state, dict) else {}
     except (json.JSONDecodeError, OSError):
-        return {}
+        state = {}
+    try:
+        with (folder / (STATE_FILENAME + "l")).open(encoding="utf-8", errors="replace") as journal:
+            for line in journal:
+                try:
+                    entry = json.loads(line)
+                    state[entry["key"]] = entry["value"]
+                except (ValueError, KeyError, TypeError):
+                    continue  # An interrupted last write must not hide earlier records.
+    except OSError:
+        pass
+    return state
+
+
+def record_state(folder: Path, key: str, value: dict) -> None:
+    """Durably record each finished file without rewriting a large queue."""
+    folder.mkdir(parents=True, exist_ok=True)
+    with (folder / (STATE_FILENAME + "l")).open("a", encoding="utf-8") as handle:
+        handle.write("\n" + json.dumps({"key": key, "value": value}) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def save_state(folder: Path, state: dict) -> None:
@@ -153,11 +172,12 @@ def save_state(folder: Path, state: dict) -> None:
     temp_file = state_file.with_suffix(state_file.suffix + ".tmp")
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        temp_file.write_text(
-            json.dumps(state, indent=2),
-            encoding="utf-8",
-        )
+        with temp_file.open("w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
         temp_file.replace(state_file)
+        (folder / (STATE_FILENAME + "l")).unlink(missing_ok=True)
     except OSError:
         with suppress(OSError):
             temp_file.unlink(missing_ok=True)

@@ -35,11 +35,16 @@ else:
         os.environ["TK_LIBRARY"] = str((staged_tk / "tk_library").resolve())
 
 customtkinter_data = collect_data_files("customtkinter")
+sys.path.insert(0, SPECPATH)
+from build_support import node_runtime_artifacts, ssl_runtime_data
+node_binaries, node_data = node_runtime_artifacts()
+customtkinter_data.extend(node_data)
+customtkinter_data.extend(ssl_runtime_data())
 
 a = Analysis(
     ["gui.py"],
     pathex=["."],
-    binaries=[],
+    binaries=node_binaries,
     datas=customtkinter_data,
     hiddenimports=["customtkinter"],
     hookspath=[],

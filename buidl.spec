@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
+sys.path.insert(0, SPECPATH)
+from build_support import node_runtime_artifacts, ssl_runtime_data
+node_binaries, node_data = node_runtime_artifacts()
 
 a = Analysis(
     ['downloader.py'],
     pathex=['src'],
-    binaries=[],
-    datas=[],
+    binaries=node_binaries,
+    datas=node_data + ssl_runtime_data(),
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

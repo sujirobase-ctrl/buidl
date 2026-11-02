@@ -7,13 +7,20 @@ from __future__ import annotations
 import os
 import sys
 import time
+import tempfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
+os.environ["BUIDL_RECOVERY_DIR"] = tempfile.mkdtemp(prefix="buidl-qa-recovery-")
 sys.path.insert(0, str(ROOT))
-os.environ["TCL_LIBRARY"] = str(ROOT / "build" / "tk-runtime" / "tcl_library")
-os.environ["TK_LIBRARY"] = str(ROOT / "build" / "tk-runtime" / "tk_library")
+for variable, folders in (("TCL_LIBRARY", ("tcl8.6", "tcl_library")),
+                          ("TK_LIBRARY", ("tk8.6", "tk_library"))):
+    for folder in folders:
+        library = ROOT / "build" / "tk-runtime" / folder
+        if library.is_dir():
+            os.environ[variable] = str(library)
+            break
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageGrab
@@ -39,10 +46,10 @@ def fixture_thumbnail(media, _cookies, stop):
 
 
 def pump(app, seconds=0.5):
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        app.update()
-        time.sleep(0.02)
+    # Use Tk's actual event loop so background-worker notifications and Tk
+    # object cleanup behave as they do in the shipped application.
+    app.after(max(1, int(seconds * 1000)), app.quit)
+    app.mainloop()
 
 
 def snapshot(window, path):

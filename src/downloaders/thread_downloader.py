@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
@@ -14,9 +14,9 @@ from bs4 import BeautifulSoup
 
 from src.config import FailReason, SkipReason, TaskResult, download_root
 from src.error_summary import summarize_error
-from src.file_utils import load_state, matches_any, sanitize_name, save_state
+from src.file_utils import load_state, matches_any, sanitize_name, save_state, record_state
 from src.parsers import ParsedPost, ThreadParser, parse_hosts
-from src.resolvers import ResolvedMedia, refresh_media, resolve
+from src.resolvers import ResolvedMedia, ResolverAccessError, refresh_media, resolve
 
 from .media_downloader import DownloadOutcome, MediaDownloader
 from .rate_limiter import RateLimiter
@@ -102,6 +102,7 @@ class ThreadDownloader:
             dry_run=options.dry_run,
             num_connections=options.connections,
             rate_limiter=self.rate_limiter,
+            cancel_event=options.cancel_event,
         )
 
     def download_thread(self, url: str) -> bool:
@@ -249,14 +250,17 @@ class ThreadDownloader:
                 break
 
             if response.status_code in (401, 403):
+                body = getattr(response, "text", "").lower()
+                protected = any(marker in body for marker in ("ddos-guard", "cf-chl-", "challenge-platform"))
+                details = (
+                    f"HTTP {response.status_code}: o site exibiu uma proteção anti-bot antes de entregar a thread. "
+                    "Isso não confirma que os cookies venceram. Verifique o acesso e a validação normal no navegador."
+                    if protected else
+                    f"HTTP {response.status_code}: acesso à thread recusado. Verifique a sessão, os cookies e as permissões no site."
+                )
                 self.live_manager.update_log(
                     event="Access denied",
-                    details=(
-                        f"HTTP {response.status_code} for {current} — this forum "
-                        "requires a logged-in session. Re-run with a cookies file "
-                        "(--cookies path/to/cookies.txt) exported from a browser "
-                        "where you are logged in."
-                    ),
+                    details=details,
                 )
                 break
 
@@ -346,10 +350,9 @@ class ThreadDownloader:
             if self.options.separate_posts and not self.options.flat:
                 destination = root / sanitize_name(post.label)
 
-            for match in matches:
+            for match, resolved in self._resolve_matches(matches, post.spoilers):
                 if not self._wait_until_runnable():
                     break
-                resolved = resolve(match.url, self.client, passwords=post.spoilers)
                 self.live_manager.update_log(
                     event="Resolved",
                     details=(
@@ -362,6 +365,8 @@ class ThreadDownloader:
                     unresolved_hosts += 1
 
                 for media in resolved:
+                    if media.warning:
+                        self.live_manager.update_log(event="Aviso de qualidade", details=media.warning)
                     media.post_label = post.label
                     media.origin_url = match.url
                     if len(resolved) == 1 and not media.thumbnail_url:
@@ -402,6 +407,38 @@ class ThreadDownloader:
             planned=len(plan),
         )
         return plan
+
+    def _resolve_matches(self, matches, passwords):
+        """Resolve two links at a time with separate sessions, in source order."""
+        if not hasattr(self.client, "fork"):
+            for match in matches:
+                if not self._wait_until_runnable():
+                    break
+                yield match, resolve(match.url, self.client, passwords=passwords)
+            return
+        local = threading.local()
+        clients = []
+        lock = threading.Lock()
+
+        def resolve_one(match):
+            if not self._wait_until_runnable():
+                return []
+            if not hasattr(local, "client"):
+                local.client = self.client.fork()
+                with lock:
+                    clients.append(local.client)
+            return resolve(match.url, local.client, passwords=passwords)
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                for offset in range(0, len(matches), 2):
+                    batch = matches[offset:offset + 2]
+                    futures = [pool.submit(resolve_one, match) for match in batch]
+                    for match, future in zip(batch, futures):
+                        yield match, future.result()
+        finally:
+            for client in clients:
+                client.close()
 
     def _warn_if_session_looks_stale(
         self,
@@ -474,9 +511,27 @@ class ThreadDownloader:
         had_failure = False
         workers = max(1, self.options.workers)
         ambiguous_names = self._ambiguous_state_names(state)
+        saved_results = 0
+        start_lock = threading.Lock()
+        host_start = {}
+        access_failures = {}
+        authentication_blocked = threading.Event()
+
+        def checkpoint(key):
+            nonlocal saved_results, had_failure
+            if self.options.dry_run:
+                return
+            try:
+                record_state(root, key, state[key])
+                saved_results += 1
+                if saved_results % 100 == 0:
+                    save_state(root, state)
+            except OSError as error:
+                had_failure = True
+                self.live_manager.update_log(event="Checkpoint error", details=f"Não foi possível salvar a retomada: {error}")
 
         def job(index: int, media: ResolvedMedia, folder: Path):  # noqa: ANN202
-            if not self._wait_until_runnable():
+            if authentication_blocked.is_set() or not self._wait_until_runnable():
                 return None
 
             state_key = media.state_key
@@ -499,13 +554,18 @@ class ThreadDownloader:
             # A small delay between file starts keeps rate-limiting CDNs
             # (filester, bunkr) happy when several workers run in parallel.
             if self.options.delay:
-                wait = self.options.delay * ((index % max(1, workers)) + 1)
+                host = urlparse(media.source_url or media.url).netloc.lower()
+                with start_lock:
+                    now = time.monotonic()
+                    slot = max(now, host_start.get(host, now))
+                    host_start[host] = slot + self.options.delay / workers
+                delay = slot - now
                 cancel_event = self.options.cancel_event
                 if cancel_event is not None:
-                    if cancel_event.wait(wait):
+                    if cancel_event.wait(delay):
                         return None
                 else:
-                    time.sleep(wait)
+                    time.sleep(delay)
             if not self._wait_until_runnable():
                 return None
 
@@ -515,7 +575,13 @@ class ThreadDownloader:
             for refresh_attempt in range(refresh_attempts):
                 if not self._wait_until_runnable():
                     return None
-                current = refresh_media(media, self.client)
+                reload_cookies = getattr(self.client, "refresh_cookies_if_changed", lambda: False)
+                if reload_cookies():
+                    self.live_manager.update_log(event="Cookies atualizados", details="O cookies.txt atualizado foi recarregado sem reiniciar a fila.")
+                try:
+                    current = refresh_media(media, self.client)
+                except ResolverAccessError as error:
+                    return DownloadOutcome(TaskResult.FAILED, FailReason.HTTP_ERROR, message=str(error)), media
                 if current is None:
                     last_outcome = DownloadOutcome(
                         TaskResult.FAILED,
@@ -567,13 +633,14 @@ class ThreadDownloader:
                     last_outcome.result is not TaskResult.FAILED
                     or not media.resolver
                     or refresh_attempt >= refresh_attempts - 1
+                    or (current is not None and not re.search(r"HTTP (401|403|404|410)\b|HTML", last_outcome.message, re.I))
                 ):
-                    return last_outcome, current
+                    return last_outcome, current or media
 
                 self.live_manager.update_log(
                     event="Refreshing link",
                     details=(
-                        f"{current.filename or media.filename}: renovando link "
+                            f"{(current or media).filename or media.filename}: renovando link "
                         f"temporário após {last_outcome.message or 'falha de rede'} "
                         f"({refresh_attempt + 1}/{refresh_attempts - 1})"
                     ),
@@ -582,7 +649,7 @@ class ThreadDownloader:
                 if refresh_attempt < refresh_attempts - 1:
                     time.sleep(0.8 * (refresh_attempt + 1))
 
-            return last_outcome, current
+            return last_outcome, current or media
 
         def stored_job(index: int, media: ResolvedMedia, folder: Path):  # noqa: ANN202
             result = job(index, media, folder)
@@ -597,14 +664,29 @@ class ThreadDownloader:
                 )
             return outcome, effective_media
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(stored_job, index, media, folder): media
-                for index, (media, folder) in enumerate(plan)
-            }
+        def completed_jobs(executor):
+            pending = {}
+            jobs = iter(enumerate(plan))
+            exhausted = False
+            while pending or not exhausted:
+                while not exhausted and len(pending) < workers * 2:
+                    if self._cancelled() or authentication_blocked.is_set():
+                        exhausted = True
+                        break
+                    try:
+                        index, (media, folder) = next(jobs)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    pending[executor.submit(stored_job, index, media, folder)] = media
+                if not pending:
+                    break
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    yield future, pending.pop(future)
 
-            for future in as_completed(futures):
-                media = futures[future]
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for future, media in completed_jobs(executor):
                 try:
                     result = future.result()
                 except Exception as error:  # noqa: BLE001
@@ -624,11 +706,28 @@ class ThreadDownloader:
                         "reason": FailReason.UNRESOLVED.name,
                         "message": message,
                     }
+                    checkpoint(media.state_key)
                     continue
 
                 if result is None:
                     continue
                 outcome, effective_media = result
+
+                host = urlparse(media.source_url or media.url).netloc.lower()
+                status = re.search(r"\bHTTP (401|403)\b", outcome.message)
+                if outcome.result is TaskResult.FAILED and status:
+                    access_failures[host] = access_failures.get(host, 0) + 1
+                    threshold = 3 if status.group(1) == "401" else 8
+                    if access_failures[host] >= threshold and not authentication_blocked.is_set():
+                        authentication_blocked.set()
+                        self.live_manager.update_log(
+                            event="Access denied",
+                            details=(f"{host}: recusas de acesso repetidas. A fila foi interrompida para evitar "
+                                     "milhares de erros. Verifique a sessão/cookies e eventuais bloqueios do host; "
+                                     "a fila salva pode ser retomada após corrigir o acesso."),
+                        )
+                else:
+                    access_failures[host] = 0
 
                 self.live_manager.update_summary(outcome.result, outcome.reason)
                 state_key = media.state_key
@@ -663,6 +762,7 @@ class ThreadDownloader:
                         "filename": effective_media.filename or media.filename or "",
                     }
 
+                checkpoint(state_key)
                 if outcome.result is TaskResult.COMPLETED and outcome.path:
                     self.live_manager.update_log(
                         event="Downloaded",

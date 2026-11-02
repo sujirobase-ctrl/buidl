@@ -29,37 +29,31 @@ jobs:
         run: python -m pip install -r requirements.txt pytest
       - name: Run offline test suite
         run: python -m pytest tests --ignore=tests/test_e2e.py -q
+      - name: Run local end-to-end tests
+        run: python -m tests.test_e2e
 
   windows:
     name: Windows executables and wheel
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
           cache: pip
       - name: Install build dependencies
         run: python -m pip install -r requirements.txt build
-      - name: Build the three executables
-        run: |
-          pyinstaller --clean --noconfirm buidl.spec
-          pyinstaller --clean --noconfirm buidl-batch.spec
-          pyinstaller --clean --noconfirm buidl-gui.spec
-      - name: Build Python wheel
-        run: python -m build --wheel
-      - name: Collect Windows artifacts
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item dist/buidl.exe release/buidl-cli.exe
-          Copy-Item dist/buidl-batch.exe release/buidl-batch.exe
-          Copy-Item dist/buidl-gui.exe release/buidl-gui.exe
-          Copy-Item dist/*.whl release/
-          Compress-Archive release/*.exe release/BUIDL-Windows-portable.zip
-          Get-ChildItem release -File | ForEach-Object {
-            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
-          } | Set-Content release/SHA256SUMS-windows.txt
+      - name: Build the Windows GUI
+        run: pyinstaller --clean --noconfirm buidl-gui.spec
+      - name: Verify bundled GoFile runtime
+        run: python tests/packaged_gofile_smoke.py dist/buidl-gui.exe
+      - name: Verify packaged TLS runtime
+        run: python tests/packaged_https_smoke.py dist/buidl-gui.exe
+      - name: Collect Windows GUI
+        run: mkdir release; copy dist/buidl-gui.exe release/BUIDL-gui.exe
       - uses: actions/upload-artifact@v4
         with:
           name: BUIDL-Windows
@@ -95,8 +89,6 @@ jobs:
         run: |
           mkdir release
           cp android/app/build/outputs/apk/debug/app-debug.apk release/BUIDL-android.apk
-          cd release
-          sha256sum BUIDL-android.apk > SHA256SUMS-android.txt
       - uses: actions/upload-artifact@v4
         with:
           name: BUIDL-Android
@@ -121,10 +113,7 @@ jobs:
           pattern: BUIDL-*
           path: release-assets
           merge-multiple: true
-      - name: Create combined checksum file
-        working-directory: release-assets
-        run: sha256sum BUIDL-android.apk BUIDL-Windows-portable.zip buidl-cli.exe buidl-batch.exe buidl-gui.exe *.whl > SHA256SUMS.txt
       - name: Create versioned release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --verify-tag --generate-notes --title "BUIDL $GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" release-assets/BUIDL-android.apk release-assets/BUIDL-gui.exe --verify-tag --generate-notes --title "BUIDL $GITHUB_REF_NAME"

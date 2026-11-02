@@ -50,6 +50,7 @@ def base_args(**overrides) -> Namespace:  # noqa: ANN003
     args = Namespace(
         custom_path=None,
         cookies=None,
+        no_cookies=True,
         all_pages=True,
         max_pages=1,
         post_ids=[],

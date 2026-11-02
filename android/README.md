@@ -1,4 +1,4 @@
-# BUIDL Android — 1.3.0-mobile
+# BUIDL Android — 2.0.0
 
 Aplicativo Android nativo (Java) com o downloader Python do projeto embutido via
 [Chaquopy](https://chaquo.com/chaquopy/doc/current/android.html). Não depende do PC

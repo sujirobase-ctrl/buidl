@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from http.cookiejar import LoadError, MozillaCookieJar
 from pathlib import Path
 
@@ -50,6 +51,15 @@ class HttpClient:
         )
         self.timeout = timeout
         self.max_retries = max_retries
+        self._cookies_lock = threading.RLock()
+        self._cookies_path = None
+        self._cookies_stamp = None
+        self._imported_cookies = set()
+        self._gofile_lock = threading.RLock()
+        self._gofile_token = None
+        adapter = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
         if cookies_file:
             self.load_cookies(cookies_file)
@@ -79,13 +89,15 @@ class HttpClient:
             )
             raise ValueError(msg) from error
 
+        stamp = (path.stat().st_mtime_ns, path.stat().st_size)
         far_future = int(time.time()) + 10 * 365 * 24 * 3600
         loaded = 0
+        new_cookies = []
         for cookie in jar:
             if not cookie.expires:
                 cookie.expires = far_future
             cookie.discard = False
-            self.session.cookies.set_cookie(cookie)
+            new_cookies.append(cookie)
             loaded += 1
 
         if loaded == 0:
@@ -94,6 +106,43 @@ class HttpClient:
                 f"Netscape format with TAB-separated fields."
             )
             raise ValueError(msg)
+        with self._cookies_lock:
+            for domain, cookie_path, name in self._imported_cookies:
+                try:
+                    self.session.cookies.clear(domain, cookie_path, name)
+                except KeyError:
+                    pass
+            for cookie in new_cookies:
+                self.session.cookies.set_cookie(cookie)
+            self._imported_cookies = {(c.domain, c.path, c.name) for c in new_cookies}
+            self._cookies_path, self._cookies_stamp = path, stamp
+
+    def refresh_cookies_if_changed(self) -> bool:
+        """Pick up a newly exported cookie file without restarting a long job."""
+        with self._cookies_lock:
+            if self._cookies_path is None:
+                return False
+            try:
+                stat = self._cookies_path.stat()
+                if (stat.st_mtime_ns, stat.st_size) == self._cookies_stamp:
+                    return False
+                self.load_cookies(str(self._cookies_path))
+                return True
+            except (OSError, ValueError):
+                # Browser exports may replace the file in two steps. Retain
+                # working cookies and try again on the next request.
+                return False
+
+    def fork(self):
+        """Give a resolver worker its own connection pool and cookie jar."""
+        with self._cookies_lock:
+            clone = HttpClient(timeout=self.timeout, max_retries=self.max_retries)
+            clone.session.headers.update(self.session.headers)
+            clone.session.cookies.update(self.session.cookies)
+            clone._cookies_path = self._cookies_path
+            clone._cookies_stamp = self._cookies_stamp
+            clone._imported_cookies = set(self._imported_cookies)
+            return clone
 
     def get(self, url: str, **kwargs) -> requests.Response:  # noqa: ANN003
         """GET with retry/backoff on transient failures.
@@ -106,9 +155,11 @@ class HttpClient:
         """
         kwargs.setdefault("timeout", self.timeout)
         kwargs.setdefault("allow_redirects", True)
+        self.refresh_cookies_if_changed()
 
         last_error: Exception | None = None
-        for attempt in range(self.max_retries):
+        attempts = 1 if kwargs.get("stream") else self.max_retries
+        for attempt in range(attempts):
             try:
                 response = self.session.get(url, **kwargs)
                 if response.status_code in (429, 500, 502, 503, 504):
@@ -120,7 +171,7 @@ class HttpClient:
                 # Server returned a retryable status. Sleep by status, then retry.
                 last_error = error
                 status = getattr(error.response, "status_code", None)
-                if attempt < self.max_retries - 1:
+                if attempt < attempts - 1:
                     if status == 429:
                         waited = _consume_retry_after(error.response)
                         if not waited:
@@ -131,18 +182,22 @@ class HttpClient:
                             time.sleep(RETRY_BACKOFF ** min(attempt, 4))
                     else:
                         time.sleep(RETRY_BACKOFF ** min(attempt, 4))
+                if kwargs.get("stream"):
+                    if error.response is not None:
+                        error.response.close()
+                    raise
                 continue
             except requests.RequestException as error:
                 # Connection drop / timeout: short backoff.
                 last_error = error
-                if attempt < self.max_retries - 1:
+                if attempt < attempts - 1:
                     time.sleep(RETRY_BACKOFF ** min(attempt, 4))
                 continue
             else:
                 return response
 
-        msg = f"GET failed after {self.max_retries} attempts: {url} ({last_error})"
-        raise requests.RequestException(msg)
+        msg = f"GET failed after {attempts} attempts: {url} ({last_error})"
+        raise requests.RequestException(msg) from last_error
 
     def get_soup(self, url: str, **kwargs) -> BeautifulSoup:  # noqa: ANN003
         """GET and parse as HTML."""

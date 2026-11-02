@@ -101,6 +101,33 @@ def test_gofile_token_formula_is_stable_for_bucket():
     assert _gofile_website_token("token", salt=resolvers.GOFILE_DEFAULT_SALT, now=now) == expected
 
 
+def test_gofile_uses_bundled_node_without_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(resolvers.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(resolvers.shutil, "which", lambda _: None)
+    (tmp_path / "node.exe").write_bytes(b"runtime")
+    assert resolvers._gofile_node_runtime() == str(tmp_path / "node.exe")
+
+
+def test_gofile_without_javascript_runtime_warns(monkeypatch, caplog):
+    monkeypatch.setattr(resolvers, "_gofile_salt_cache", None)
+    monkeypatch.setattr(resolvers, "_gofile_node_runtime", lambda: None)
+    assert resolvers._discover_gofile_salt(object()) == resolvers.GOFILE_DEFAULT_SALT
+    assert "last known" in caplog.text
+
+
+def test_gofile_runtime_timeout_falls_back(monkeypatch, caplog):
+    from types import SimpleNamespace
+    import subprocess
+    monkeypatch.setattr(resolvers, "_gofile_salt_cache", None)
+    monkeypatch.setattr(resolvers, "_gofile_node_runtime", lambda: "node")
+    def run(*args, **kwargs):
+        raise subprocess.TimeoutExpired("node", 25)
+    monkeypatch.setattr(resolvers.subprocess, "run", run)
+    client = SimpleNamespace(timeout=30, get=lambda *args, **kwargs: SimpleNamespace(text="function generateWT(){}"))
+    assert resolvers._discover_gofile_salt(client) == resolvers.GOFILE_DEFAULT_SALT
+    assert "last known" in caplog.text
+
+
 def test_new_host_variants_are_detected():
     html = " ".join(
         [

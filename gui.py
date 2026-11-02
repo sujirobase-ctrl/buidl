@@ -6,6 +6,7 @@ import os
 import queue
 import threading
 import time
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -22,6 +23,7 @@ from src.managers.log_manager import LoggerTable
 from src.managers.summary_manager import SummaryManager
 from src.preview import PreviewCommand, PreviewSession, preview_fingerprint
 from src.preview_gui import PreviewWindow
+from src.recovery import RecoveryStore
 
 APP_NAME = "BUIDL"
 ACCENT = "#6C63FF"
@@ -40,6 +42,33 @@ FAILURE_EVENTS = {
     "Access denied",
     "Login required",
 }
+
+
+def default_download_directory() -> Path:
+    """Use the user's files, independent of the app that launched the EXE."""
+    return Path.home() / "Downloads" / "BUIDL"
+
+
+def validate_output_directory(value: str) -> Path:
+    folder = Path(value).expanduser()
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(prefix=".buidl-write-check-", dir=folder):
+            pass
+    except OSError as error:
+        raise ValueError("Não foi possível gravar na pasta de destino. Escolha uma pasta sua, como Downloads/BUIDL.") from error
+    return folder
+
+
+def recovery_output_directory(document) -> str:
+    options = document["options"]
+    saved = options.get("download_path") or options.get("custom_path") or ""
+    if not document.get("prepared") and "windowsapps" in {part.lower() for part in Path(saved).parts}:
+        # Earlier builds inherited the launcher's protected working directory.
+        # No prepared queue exists here, so no downloaded files are relocated.
+        saved = str(default_download_directory())
+        options["download_path"], options["custom_path"] = saved, None
+    return saved
 
 
 class GuiManager:
@@ -136,7 +165,7 @@ class BuidlApp(ctk.CTk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"{APP_NAME} — Media Downloader")
+        self.title(f"{APP_NAME} — Media Downloader (HTTPS corrigido)")
         self.geometry("1120x760")
         self.minsize(980, 680)
         self.configure(fg_color="#0D0F17")
@@ -151,17 +180,70 @@ class BuidlApp(ctk.CTk):
         self.total_files = 0
         self.last_counts = {"completed": 0, "skipped": 0, "failed": 0}
         self.failures: list[tuple[str, str, str]] = []
-        self.current_log_file = Path.cwd() / "buidl-gui.log"
+        self.current_log_file = default_download_directory() / "buidl-gui.log"
         self.preview_window: PreviewWindow | None = None
         self.selection_queue: queue.Queue = queue.Queue()
         self.preview_phase = False
         self.preview_session: PreviewSession | None = None
         self.active_preview_key: tuple = ()
+        self.recovery = RecoveryStore()
+        self._resume_document = None
+        self.recovery_error = None
 
         self._build_layout()
         self._load_defaults()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(80, self._poll_events)
+        self.after(300, self._offer_recovery)
+
+    def _offer_recovery(self):
+        if self.running:
+            return
+        pending = self.recovery.pending()
+        if not pending:
+            return
+        document = pending[0]
+        answer = messagebox.askyesnocancel(
+            "Continuar download interrompido?",
+            "Há um download que não terminou. Continuar da fila salva, preservando os arquivos já baixados?\n\n"
+            "Sim: continuar. Não: dispensar este aviso. Cancelar: decidir depois.", parent=self,
+        )
+        if answer is None:
+            return
+        if not answer:
+            self.recovery.path = Path(document["_path"])
+            self.recovery.complete()
+            return
+        try:
+            options = document["options"]
+            values = {"url_entry": document["url"], "cookies_entry": document.get("cookies_file") or "",
+                      "output_entry": recovery_output_directory(document),
+                      "workers_entry": options["workers"], "connections_entry": options["connections"],
+                      "retries_entry": options["max_retries"], "pages_entry": options["max_pages"],
+                      "delay_entry": options["delay"], "ignore_entry": ",".join(options["ignore"]),
+                      "include_entry": ",".join(options["include"]),
+                      "rate_entry": options["rate_limit"] / (1024 * 1024) if options.get("rate_limit") else ""}
+            for name, value in values.items():
+                self._replace_entry(getattr(self, name), str(value))
+            for name in ("all_pages", "dry_run", "separate_posts", "flat"):
+                getattr(self, name).set(options.get(name, False))
+            RecoveryStore.restore_prepared(document)
+            self._resume_document = document
+            preview = document.get("phase") == "selection" or (not document.get("prepared") and document.get("preview"))
+            self._start_download(preview=preview)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            messagebox.showerror("Não foi possível restaurar a fila", str(error), parent=self)
+
+    def _save_recovery(self, method, *args, **kwargs):
+        try:
+            getattr(self.recovery, method)(*args, **kwargs)
+            return True
+        except (OSError, ValueError) as error:
+            if self.recovery_error is None:
+                self.recovery_error = str(error)
+                self.events.put(("log", datetime.now().strftime("%H:%M:%S"), "Aviso de retomada",
+                                 "Não foi possível gravar a fila de recuperação. Verifique espaço e permissões da pasta de dados."))
+            return False
 
     def _build_layout(self) -> None:
         self.grid_columnconfigure(1, weight=1)
@@ -216,7 +298,7 @@ class BuidlApp(ctk.CTk):
         self.theme_switch.grid(row=9, column=0, padx=26, pady=(0, 16), sticky="w")
         ctk.CTkLabel(
             sidebar,
-            text=f"v{__version__}",
+            text=f"v{__version__} · HTTPS corrigido",
             text_color=TEXT_MUTED,
             font=ctk.CTkFont("Segoe UI", 10),
         ).grid(row=10, column=0, padx=28, pady=(0, 24), sticky="w")
@@ -375,7 +457,7 @@ class BuidlApp(ctk.CTk):
             column=1,
             columnspan=1,
             label="SALVAR EM (PASTA EXATA)",
-            value=str(Path.cwd() / "Downloads"),
+            value=str(default_download_directory()),
             command=self._choose_output,
         )
 
@@ -652,6 +734,7 @@ class BuidlApp(ctk.CTk):
             output_value = self.output_entry.get().strip()
             if not output_value:
                 raise ValueError("Selecione uma pasta base.")
+            validate_output_directory(output_value)
 
             workers = self._positive_int(self.workers_entry.get(), "Workers")
             connections = self._positive_int(self.connections_entry.get(), "Conexões")
@@ -698,6 +781,11 @@ class BuidlApp(ctk.CTk):
             cancel_event=self.cancel_event,
             pause_event=self.pause_event,
         )
+        resume_document = self._resume_document
+        self._resume_document = None
+        self.recovery_error = None
+        if not options.dry_run:
+            self._save_recovery("begin", url, cookie_value or None, options, preview, resume=resume_document)
         log_file = Path(output_value) / "buidl-gui.log"
         cached = None
         if preview:
@@ -717,7 +805,7 @@ class BuidlApp(ctk.CTk):
         self.current_log_file = log_file
         self.worker_thread = threading.Thread(
             target=self._download_worker,
-            args=(url, cookie_value or None, options, log_file, preview, self.selection_queue, cached),
+            args=(url, cookie_value or None, options, log_file, preview, self.selection_queue, cached, resume_document),
             daemon=True,
             name="buidl-download",
         )
@@ -732,6 +820,7 @@ class BuidlApp(ctk.CTk):
         preview: bool = False,
         decisions: queue.Queue | None = None,
         cached=None,
+        resume_document=None,
     ) -> None:
         manager = GuiManager(self.events, log_file)
         client = None
@@ -740,10 +829,15 @@ class BuidlApp(ctk.CTk):
             manager.start()
             client = HttpClient(cookies_file=cookies_file)
             downloader = ThreadDownloader(client, manager, options)
+            prepared = RecoveryStore.restore_prepared(resume_document) if resume_document else cached
+            if prepared is None:
+                prepared = downloader.prepare_thread(url)
+            if prepared is not None and not options.dry_run:
+                self._save_recovery("save_prepared", prepared, preview)
             if not preview:
-                failed = downloader.download_thread(url)
+                selection = resume_document.get("selection") if resume_document else None
+                failed = True if prepared is None else downloader.download_prepared(prepared, set(selection) if selection is not None else None)
             else:
-                prepared = cached if cached is not None else downloader.prepare_thread(url)
                 if cached is not None:
                     manager.update_log(event="Galeria reutilizada", details="Lista mantida nesta sessão; sem nova busca da thread.")
                 while prepared is not None and prepared.plan and not self.cancel_event.is_set():
@@ -774,6 +868,8 @@ class BuidlApp(ctk.CTk):
             if client is not None:
                 client.close()
             manager.stop()
+            if not failed and not self.cancel_event.is_set() and not options.dry_run:
+                self._save_recovery("complete")
             self.events.put(("done", failed, self.cancel_event.is_set()))
 
     def _poll_events(self) -> None:
@@ -843,6 +939,8 @@ class BuidlApp(ctk.CTk):
         self.pause_button.configure(state="normal", text="Pausar")
         self.status_label.configure(text="●  Baixando seleção", text_color=ACCENT_HOVER)
         self.progress_title.configure(text="Iniciando os arquivos escolhidos…")
+        if not self.dry_run.get():
+            self._save_recovery("select", keys)
         self.selection_queue.put(keys)
 
     def _cancel_preview(self) -> None:
@@ -1017,6 +1115,10 @@ class BuidlApp(ctk.CTk):
         self.running = False
         self.progress.stop()
         self._set_running_ui(False)
+        if not self.total_files:
+            self.progress.configure(mode="determinate")
+            self.progress.set(0)
+            self.progress_text.configure(text="Não iniciado")
         if cancelled:
             self.status_label.configure(text="●  Cancelado", text_color=WARNING)
             self.progress_title.configure(text=(
@@ -1053,7 +1155,7 @@ class BuidlApp(ctk.CTk):
             self._set_settings_state(child, state)
 
     def _open_downloads(self) -> None:
-        base = Path(self.output_entry.get().strip() or (Path.cwd() / "Downloads"))
+        base = Path(self.output_entry.get().strip() or default_download_directory())
         base.mkdir(parents=True, exist_ok=True)
         try:
             os.startfile(base)  # type: ignore[attr-defined]

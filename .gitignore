@@ -9,6 +9,7 @@ dist/Downloads/
 session.log
 simpcity.log
 .fpd_state.json
+.fpd_state.jsonl
 
 # Python
 .venv/

@@ -68,6 +68,7 @@ def test_nested_original_url_and_probe_fallback():
     out = _resolve_goodbox("https://goonbox.cr/img/aVhBYYe", client)
     assert len(out) == 1
     assert out[0].url == "https://cdn.cr/original.jpg"
+    assert out[0].warning is None
 
 
 def test_cloudflare_api_failure_returns_embedded_thumbnail():
@@ -76,6 +77,7 @@ def test_cloudflare_api_failure_returns_embedded_thumbnail():
     out = _resolve_goodbox("https://goonbox.cr/img/blocked", client)
     assert len(out) == 1
     assert out[0].url == "https://cdn.cr/thumb.md.jpg"
+    assert "miniatura" in out[0].warning
 
 
 def test_album_paginates():

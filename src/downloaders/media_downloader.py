@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -56,6 +57,7 @@ class MediaDownloader:
         dry_run: bool = False,
         num_connections: int = 1,
         rate_limiter: RateLimiter | None = None,
+        cancel_event=None,
     ) -> None:
         self.client = client
         self.live_manager = live_manager
@@ -63,6 +65,7 @@ class MediaDownloader:
         self.dry_run = dry_run
         self.num_connections = max(1, num_connections)
         self.rate_limiter = rate_limiter
+        self.cancel_event = cancel_event
         self._claim_lock = threading.Lock()
         self._claimed_by_url: dict[str, Path] = {}
         self._claimed_paths: set[Path] = set()
@@ -105,6 +108,8 @@ class MediaDownloader:
         last_error = ""
         last_status: int | None = None
         for attempt in range(self.max_retries + 1):
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                return DownloadOutcome(TaskResult.FAILED, FailReason.NETWORK_ERROR, message="Download cancelado; partes preservadas")
             try:
                 outcome = self._attempt(media, folder, headers, task_index)
                 if outcome.reason is not FailReason.NETWORK_ERROR:
@@ -118,7 +123,7 @@ class MediaDownloader:
                 status = getattr(getattr(error, "response", None), "status_code", None)
                 last_status = status
                 last_error = str(error)
-                if media.resolver and status in (401, 403, 404, 410):
+                if status in (401, 403, 404, 410):
                     return DownloadOutcome(
                         TaskResult.FAILED,
                         FailReason.HTTP_ERROR,
@@ -126,7 +131,15 @@ class MediaDownloader:
                     )
                 if attempt < self.max_retries:
                     if status == 429:
-                        time.sleep(min(RATE_429_BACKOFF ** (attempt + 1), 60))
+                        retry_after = getattr(error.response, "headers", {}).get("Retry-After", "")
+                        try:
+                            backoff = min(max(float(retry_after), 0), 60)
+                        except ValueError:
+                            backoff = min(RATE_429_BACKOFF ** (attempt + 1), 60)
+                        if self.cancel_event is not None:
+                            self.cancel_event.wait(backoff)
+                        else:
+                            time.sleep(backoff)
                     else:
                         time.sleep(RETRY_BACKOFF ** min(attempt, 4))
             except requests.RequestException as error:
@@ -299,6 +312,8 @@ class MediaDownloader:
         try:
             with temp_path.open(mode) as handle:
                 for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                    if self.cancel_event is not None and self.cancel_event.is_set():
+                        return DownloadOutcome(TaskResult.FAILED, FailReason.NETWORK_ERROR, message="Download cancelado; partes preservadas")
                     if not chunk:
                         continue
                     handle.write(chunk)
@@ -307,6 +322,8 @@ class MediaDownloader:
                         self.live_manager.update_task(task_id, completed=downloaded)
                     else:
                         self.live_manager.update_task(task_id, advance=1)
+                handle.flush()
+                os.fsync(handle.fileno())
         except (requests.RequestException, OSError) as error:
             return DownloadOutcome(
                 TaskResult.FAILED,

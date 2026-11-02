@@ -67,6 +67,17 @@ def test_prepare_does_not_download_or_save_state(tmp_path, monkeypatch):
     assert not prepared.root.exists()
 
 
+def test_quality_warning_is_visible_during_preparation(tmp_path, monkeypatch):
+    manager = Manager()
+    downloader = ThreadDownloader(object(), manager, ThreadOptions(download_path=str(tmp_path)))
+    posts = [ParsedPost("1", "4", 1, "", '<a href="https://goonbox.cr/img/demo">Photo</a>')]
+    monkeypatch.setattr(downloader, "_collect_pages", lambda _url: ("Thread", posts))
+    item = ResolvedMedia("https://cdn.cr/thumb.jpg", "thumb.jpg", warning="Original indisponível; miniatura.")
+    monkeypatch.setattr(thread_module, "resolve", lambda *args, **kwargs: [item])
+    assert downloader.prepare_thread("https://example.test/threads/1").plan
+    assert any(log["event"] == "Aviso de qualidade" and "miniatura" in log["details"] for log in manager.logs)
+
+
 def test_video_poster_belongs_only_to_its_source(tmp_path, monkeypatch):
     downloader = ThreadDownloader(object(), Manager(), ThreadOptions(download_path=str(tmp_path)))
     posts = [ParsedPost("1", "4", 1, "", (
@@ -244,7 +255,7 @@ def test_gui_worker_waits_for_selection_before_fetching_media(tmp_path, decision
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     Thread(target=server.serve_forever, daemon=True).start()
     events, decisions, stop = Queue(), Queue(), Event()
-    app = SimpleNamespace(events=events, cancel_event=stop)
+    app = SimpleNamespace(events=events, cancel_event=stop, _save_recovery=lambda *args, **kwargs: True)
     options = ThreadOptions(download_path=str(tmp_path), workers=1, delay=0, cancel_event=stop)
     worker = Thread(
         target=gui.BuidlApp._download_worker,

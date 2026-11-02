@@ -19,7 +19,7 @@ MAX_VIDEO_BYTES = 24 * 1024 * 1024
 VIDEO_TIMEOUT = 20
 VIDEO_SIZE = (320, 180)
 VIDEO_FPS = 8
-VIDEO_SECONDS = 6
+VIDEO_SECONDS = 10
 BLOCK_SIZE = 256 * 1024
 
 
@@ -244,7 +244,7 @@ def fetch_video_preview(media: ResolvedMedia, cookies_file: str | None, stop: Ev
     if stop.is_set():
         return VideoPreview()
     if len(result.frames) > 1:
-        result.message = "Trecho de até 6 segundos · sem áudio"
+        result.message = "Trecho de até 10 segundos · sem áudio"
     elif result.frames:
         result.message = "Somente capa disponível. O arquivo ainda pode ser baixado."
     return result

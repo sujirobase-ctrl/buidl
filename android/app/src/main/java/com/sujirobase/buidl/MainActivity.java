@@ -240,7 +240,7 @@ public class MainActivity extends Activity {
         advanced.addView(toggle);advanced.addView(options);content.addView(advanced);
         formControls.add(url);formControls.add(allPages);formControls.add(separatePosts);formControls.add(workers);formControls.add(include);formControls.add(ignore);
         content.addView(button("Ver falhas e atividade",false,this::showLogs));
-        content.addView(text("BUIDL · 1.3.0\nNa pasta do app, exporte antes de desinstalar. Uma pasta externa precisa de espaço temporário durante o download.",14,MUTED));
+        content.addView(text("BUIDL · 2.0.0\nNa pasta do app, exporte antes de desinstalar. Uma pasta externa precisa de espaço temporário durante o download.",14,MUTED));
     }
 
     private void saveForm() {

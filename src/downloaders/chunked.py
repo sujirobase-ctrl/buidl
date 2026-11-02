@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import shutil
 import threading
@@ -271,10 +272,14 @@ def verify_chunks(chunk_paths: list[Path], expected_sizes: list[int]) -> bool:
 
 def merge_chunks(chunk_paths: list[Path], final_path: Path) -> None:
     """Concatenate ordered .partN files into the final destination."""
-    with final_path.open("wb") as destination:
+    staged = final_path.with_name(final_path.name + ".merge.part")
+    with staged.open("wb") as destination:
         for chunk_path in chunk_paths:
             with chunk_path.open("rb") as chunk_file:
                 shutil.copyfileobj(chunk_file, destination)
+        destination.flush()
+        os.fsync(destination.fileno())
+    staged.replace(final_path)
 
 
 def cleanup(chunk_paths: list[Path], base_path: Path) -> None:

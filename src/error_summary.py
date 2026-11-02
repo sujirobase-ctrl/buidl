@@ -90,9 +90,9 @@ def summarize_error(raw: str) -> str:
     if "401" in raw_l or "unauthorized" in raw_l:
         return "não autorizado (401) — sessão pode ter expirado, reexporte cookies.txt"
     if "404" in raw_l or "not found" in raw_l:
-        return "arquivo não encontrado (404) — link quebrado"
+        return "recurso não encontrado (404) — removido, endereço alterado ou link temporário expirado"
     if "410" in raw_l or "gone" in raw_l:
-        return "link temporário expirado (410) — será necessário renová-lo"
+        return "recurso indisponível (410) — removido ou link temporário inválido"
     if any(code in raw_l for code in ("500", "502", "503", "504")) or "gateway" in raw_l:
         return "erro temporário do servidor (5xx) — tente de novo mais tarde"
 

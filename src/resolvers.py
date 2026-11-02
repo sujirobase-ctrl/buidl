@@ -10,16 +10,22 @@ link when it already points at a media file.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
+import logging
 import json
 import os
 import random
 import re
 import shutil
 import subprocess
+import sys
 import time
+import threading
 from dataclasses import dataclass
-from urllib.parse import quote, urlencode, urljoin, urlparse
+from pathlib import Path
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
 
@@ -41,6 +47,14 @@ GOFILE_WT_SCRIPT = "https://gofile.io/js/wt.obf.js"
 GOFILE_DEFAULT_SALT = "12af056dacea0b"
 GOFILE_LANGUAGE = "en-US"
 _gofile_salt_cache: str | None = None
+logger = logging.getLogger(__name__)
+_GOFILE_LOCK = threading.RLock()
+
+
+class ResolverAccessError(RuntimeError):
+    def __init__(self, status):
+        self.status = status
+        super().__init__(f"HTTP {status} ao renovar o link: acesso recusado pelo host")
 
 
 def _truthy(value: object) -> bool:
@@ -85,6 +99,7 @@ class ResolvedMedia:
     thumbnail_url: str | None = None
     post_label: str = ""
     origin_url: str | None = None
+    warning: str | None = None
 
     @property
     def state_key(self) -> str:
@@ -268,41 +283,87 @@ def _resolve_gallery(url: str, client: HttpClient) -> list[ResolvedMedia]:
 def _resolve_bunkr(url: str, client: HttpClient) -> list[ResolvedMedia]:
     """bunkr file (/f/) or album (/a/) pages -> signed CDN URLs.
 
-    bunkr does not expose a direct media link in markup. The download button
-    carries a numeric data-id; the real URL is minted at click time via
-    POST /api/_001_v2 (returns mediafiles + path) and then signed through
-    https://glb-apisign.cdn.cr/sign?path=... (returns token + ex). We replicate
-    that flow here; the resolved URL is a real binary, not the HTML interstitial.
+    Read the numeric data-file-id (or older data-id/file links), request the
+    current metadata API, decode its URL and refresh the CDN signature.
+    Legacy mediafiles/path payloads remain supported. Album pages are walked
+    until no new slugs remain, with a bound matching the upstream userscript.
     """
+    legacy_cdn = re.match(r"https?://(?:cdn\d*|stream)\.bunkr+\.[a-z]+/", url, re.IGNORECASE)
+    if legacy_cdn:
+        # Follow the old CDN's redirect to the view page, then resolve its ID.
+        soup = _soup_of(client, url)
+        node = soup.select_one("[data-file-id], #download-btn[data-id]")
+        ids = re.findall(r"/file/(\d+)", str(soup))
+        legacy_id = (node.get("data-file-id") or node.get("data-id")) if node else (ids[0] if ids else None)
+        if not legacy_id:
+            return []
     match = re.search(r"bunkr+(\.[a-z]{2,6})/(a|v|f|d)/([\w\-]+)", url, re.IGNORECASE)
-    if not match:
+    if not match and not legacy_cdn:
         # already-direct CDN link (e.g. cdn*.bunkr or i*.bunkr)
         if is_direct_media(url) and re.search(r"(cdn|i)\d*\.bunkr", url, re.IGNORECASE):
             return [ResolvedMedia(url=url, filename=filename_from_url(url),
                                   headers={"Referer": "https://bunkr.site/"})]
         return []
 
-    kind, slug = match.group(2), match.group(3)
+    kind, slug = (match.group(2), match.group(3)) if match else ("f", legacy_id)
     def _sign_one(file_id: str, folder: str) -> list[ResolvedMedia]:
-        # Metadata API lives on dl.bunkr.cr regardless of which host served the
-        # page (bunkr.cr / bunkr.ph both 404 on their own origin's /api/_001_v2).
+        # Current API returns a plain or XOR-encoded URL. Keep the legacy
+        # mediafiles/path response supported for older mirrors.
         try:
-            meta = client.session.post(
-                "https://dl.bunkr.cr/api/_001_v2",
+            response = client.session.post(
+                "https://apidl.bunkr.ru/api/_001_v2",
                 json={"id": file_id},
-                headers={"Content-Type": "application/json", "Referer": "https://bunkr.site/"},
+                headers={"Content-Type": "application/json",
+                         "Referer": f"https://get.bunkrr.su/file/{file_id}",
+                         "Origin": "https://get.bunkrr.su"},
                 timeout=client.timeout,
-            ).json()
+            )
+            if getattr(response, "status_code", None) in (401, 403):
+                raise ResolverAccessError(response.status_code)
+            meta = response.json()
             if not isinstance(meta, dict):
                 return []
         except (*requests_exceptions(), KeyError, ValueError):
             return []
+        if meta.get("url"):
+            try:
+                raw = str(meta["url"])
+                if _truthy(meta.get("encrypted")):
+                    key = f"SECRET_KEY_{int(meta['timestamp']) // 3600}".encode()
+                    encoded = base64.b64decode(raw, validate=True)
+                    raw = bytes(b ^ key[i % len(key)] for i, b in enumerate(encoded)).decode("utf-8")
+                raw = raw.strip()
+                if raw.startswith("//"):
+                    raw = "https:" + raw
+                if urlparse(raw).scheme not in ("http", "https") or not urlparse(raw).netloc:
+                    return []
+            except (KeyError, TypeError, ValueError, UnicodeError, binascii.Error):
+                return []
+            signed = raw
+            # Signing is best-effort, as in upstream: some URLs already carry
+            # valid credentials or are served by a CDN that needs no signature.
+            if not re.search(r"[?&]token=", raw):
+                try:
+                    sign = client.session.get(
+                        "https://glb-apisign.cdn.cr/sign?path=" + quote(unquote(urlparse(raw).path), safe=""),
+                        timeout=client.timeout,
+                    ).json()
+                    if isinstance(sign, dict) and sign.get("token") and sign.get("ex"):
+                        parsed = urlparse(raw)
+                        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+                        params.update(token=sign["token"], ex=sign["ex"])
+                        signed = urlunparse(parsed._replace(query=urlencode(params)))
+                except (*requests_exceptions(), ValueError):
+                    pass
+            name = meta.get("original") or meta.get("filename") or filename_from_url(raw)
+            return [ResolvedMedia(url=signed,
+                                  filename=sanitize_name(name),
+                                  subfolder=folder, headers={"Referer": "https://bunkr.site/"})]
         mediafiles = meta.get("mediafiles")
         path = meta.get("path")
         if not mediafiles or not path:
             return []
         raw = mediafiles.rstrip("/") + "/" + path.lstrip("/")
-        from urllib.parse import quote
         try:
             sign = client.session.get(
                 "https://glb-apisign.cdn.cr/sign?path=" + quote(path, safe=""),
@@ -334,30 +395,88 @@ def _resolve_bunkr(url: str, client: HttpClient) -> list[ResolvedMedia]:
         )
         items: list[ResolvedMedia] = []
         seen: set[str] = set()
-        for anchor in soup.select('a[href*="/f/"], a[href*="/v/"], a[href*="/d/"]'):
-            item_url = urljoin(url, anchor["href"])
-            m = re.search(r"/(f|v|d)/([\w\-]+)", item_url)
-            if not m:
-                continue
-            # each album item is a file page; extract its numeric id
-            page = _soup_of(client, item_url)
-            btn = page.select_one("#download-btn[data-id]")
-            nums = re.findall(r"/file/(\d+)", str(page))
-            file_id = btn.get("data-id") if btn else (nums[0] if nums else m.group(2))
-            for media in _sign_one(file_id, folder):
-                if media.url in seen:
+        seen_slugs: set[str] = set()
+        for page_number in range(1, 501):
+            fresh = 0
+            for anchor in soup.select('a[href*="/f/"], a[href*="/v/"], a[href*="/d/"]'):
+                item_url = urljoin(url, anchor["href"])
+                m = re.search(r"/(f|v|d)/([\w\-]+)", item_url)
+                if not m or m.group(2) in seen_slugs:
                     continue
-                seen.add(media.url)
-                items.append(media)
+                seen_slugs.add(m.group(2))
+                fresh += 1
+                try:
+                    page = _soup_of(client, item_url)
+                    btn = page.select_one("[data-file-id], #download-btn[data-id]")
+                    nums = re.findall(r"/file/(\d+)", str(page))
+                    file_id = (btn.get("data-file-id") or btn.get("data-id")) if btn else (nums[0] if nums else m.group(2))
+                    for media in _sign_one(file_id, folder):
+                        if media.url not in seen:
+                            seen.add(media.url)
+                            items.append(media)
+                except requests_exceptions():
+                    logger.warning("Bunkr: an album item could not be resolved.")
+            if not fresh or page_number == 500:
+                break
+            parsed = urlparse(url)
+            params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+            params["page"] = str(page_number + 1)
+            try:
+                soup = _soup_of(client, urlunparse(parsed._replace(query=urlencode(params))))
+            except requests_exceptions():
+                logger.warning("Bunkr: album pagination failed; returning the files already resolved.")
+                break
         return items
 
     # single file page: numeric id lives in /file/<digits> (data-id absent on
     # the lightweight page); fall back to the slug if nothing matches.
+    if legacy_cdn:
+        return _sign_one(legacy_id, "bunkr")
     soup = _soup_of(client, url)
-    btn = soup.select_one("#download-btn[data-id]")
+    btn = soup.select_one("[data-file-id], #download-btn[data-id]")
     nums = re.findall(r"/file/(\d+)", str(soup))
-    file_id = btn.get("data-id") if btn else (nums[0] if nums else slug)
+    file_id = (btn.get("data-file-id") or btn.get("data-id")) if btn else (nums[0] if nums else slug)
     return _sign_one(file_id, "bunkr")
+
+
+def _queue_bunkr(url: str, client: HttpClient) -> list[ResolvedMedia]:
+    """Collect source pages, never mint thousands of expiring URLs in advance."""
+    if "/a/" not in url:
+        if is_direct_media(url) and not re.match(r"https?://(?:cdn\d*|stream)\.bunkr", url, re.I):
+            return _resolve_bunkr(url, client)
+        return [ResolvedMedia(url=url, filename=filename_from_url(url), source_url=url, resolver="bunkr")]
+    base = urlparse(url)
+    items, seen = [], set()
+    folder = "bunkr"
+    for page_number in range(1, 501):
+        params = dict(parse_qsl(base.query))
+        if page_number > 1:
+            params["page"] = str(page_number)
+        page_url = urlunparse(base._replace(query=urlencode(params)))
+        try:
+            soup = _soup_of(client, page_url)
+        except requests_exceptions():
+            break
+        if page_number == 1:
+            title = soup.select_one("h1")
+            folder = sanitize_name(title.get_text(" ", strip=True) if title else "bunkr")
+        fresh = 0
+        for anchor in soup.select('a[href*="/f/"], a[href*="/v/"], a[href*="/d/"]'):
+            source = urljoin(url, anchor["href"])
+            match = re.search(r"/(?:f|v|d)/([\w-]+)", source)
+            if not match or match.group(1) in seen:
+                continue
+            seen.add(match.group(1))
+            fresh += 1
+            name = anchor.get("title") or anchor.get("download") or anchor.get_text(" ", strip=True)
+            name = sanitize_name(name or filename_from_url(source))
+            image = anchor.select_one("img[src], img[data-src]")
+            thumbnail = urljoin(url, image.get("data-src") or image.get("src")) if image else None
+            items.append(ResolvedMedia(url=source, filename=name, subfolder=folder,
+                                       source_url=source, resolver="bunkr", thumbnail_url=thumbnail))
+        if not fresh:
+            break
+    return items
 
 
 def _resolve_cyberdrop(url: str, client: HttpClient) -> list[ResolvedMedia]:
@@ -594,6 +713,16 @@ def _queue_filester(url: str, client: HttpClient) -> list[ResolvedMedia]:
     return queued
 
 
+def _gofile_node_runtime() -> str | None:
+    """Prefer the runtime shipped with the Windows executable over PATH."""
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        bundled = Path(bundle) / "node.exe"
+        if bundled.is_file():
+            return str(bundled)
+    return shutil.which("node")
+
+
 def _discover_gofile_salt(client: HttpClient, *, force: bool = False) -> str:
     """Read GoFile's current WT salt, using Node when available.
 
@@ -606,7 +735,7 @@ def _discover_gofile_salt(client: HttpClient, *, force: bool = False) -> str:
     if _gofile_salt_cache and not force:
         return _gofile_salt_cache
 
-    node = shutil.which("node")
+    node = _gofile_node_runtime()
     if node:
         try:
             source = client.get(GOFILE_WT_SCRIPT, timeout=min(client.timeout, 20)).text
@@ -617,7 +746,7 @@ def _discover_gofile_salt(client: HttpClient, *, force: bool = False) -> str:
                     "const box={navigator:{userAgent:'probe',language:'en-US'}};"
                     "vm.createContext(box);vm.runInContext(s,box,{timeout:5000});"
                     "vm.runInContext('_sha256=x=>x',box);"
-                    "process.stdout.write(String(vm.runInContext(\"generateWT('TOKEN')\",box)));});"
+                    "process.stdout.write(String(vm.runInContext(\"generateWT('TOKEN')\",box,{timeout:5000})));});"
                 )
                 flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 result = subprocess.run(
@@ -636,6 +765,7 @@ def _discover_gofile_salt(client: HttpClient, *, force: bool = False) -> str:
         except (*requests_exceptions(), OSError, subprocess.SubprocessError):
             pass
 
+    logger.warning("GoFile: using the last known website-token salt; install Node.js if authentication fails.")
     _gofile_salt_cache = GOFILE_DEFAULT_SALT
     return _gofile_salt_cache
 
@@ -660,7 +790,7 @@ def _resolve_gofile(
     passwords: list[str] | None = None,
 ) -> list[ResolvedMedia]:
     """Resolve current GoFile files/folders with dynamic website auth."""
-    match = re.search(r"gofile\.io/d/(\w+)", url)
+    match = re.search(r"gofile\.io/d/([\w-]+)", url)
     if not match:
         return []
     content_id = match.group(1)
@@ -674,6 +804,7 @@ def _resolve_gofile(
             timeout=client.timeout,
         ).json()
         token = account["data"]["token"]
+        client._gofile_token = token
         client.session.cookies.set("accountToken", token, domain=".gofile.io", path="/")
         try:
             client.session.get(
@@ -686,15 +817,16 @@ def _resolve_gofile(
         return token
 
     try:
-        token = new_account()
+        with getattr(client, "_gofile_lock", _GOFILE_LOCK):
+            token = getattr(client, "_gofile_token", None) or new_account()
     except (*requests_exceptions(), KeyError, ValueError, json.JSONDecodeError):
         return []
 
-    def fetch(content: str, password_hash: str | None = None, *, refresh_salt: bool = False) -> dict:
+    def fetch(content: str, password_hash: str | None = None, *, refresh_salt: bool = False, page: int = 1) -> dict:
         salt = _discover_gofile_salt(client, force=refresh_salt)
         params: dict[str, object] = {
             "contentFilter": "",
-            "page": 1,
+            "page": page,
             "pageSize": 1000,
             "sortField": "createTime",
             "sortDirection": -1,
@@ -713,20 +845,23 @@ def _resolve_gofile(
             },
             timeout=client.timeout,
         )
+        if response.status_code in (401, 403):
+            return {"status": "error-unauthorized"}
         return response.json()
 
-    def fetch_with_password(content: str) -> dict:
+    def fetch_with_password(content: str, page: int = 1) -> dict:
         nonlocal token
         try:
-            result = fetch(content)
+            result = fetch(content, page=page)
             status = str(result.get("status") or result.get("message") or "").lower()
             if any(word in status for word in ("unauthorized", "invalid token", "website-token")):
                 _discover_gofile_salt(client, force=True)
-                token = new_account()
-                result = fetch(content)
+                with getattr(client, "_gofile_lock", _GOFILE_LOCK):
+                    token = new_account()
+                result = fetch(content, page=page)
             if result.get("status") == "error-passwordRequired":
                 for password in passwords:
-                    attempt = fetch(content, hashlib.sha256(password.encode("utf-8")).hexdigest())
+                    attempt = fetch(content, hashlib.sha256(password.encode("utf-8")).hexdigest(), page=page)
                     if attempt.get("status") == "ok":
                         return attempt
             return result
@@ -762,32 +897,43 @@ def _resolve_gofile(
                 filename=sanitize_name(str(obj.get("name") or "")) or filename_from_url(link),
                 subfolder=folder,
                 headers={"Cookie": f"accountToken={token}", "Referer": "https://gofile.io/"},
+                source_url=f"https://gofile.io/d/{file_id}" if file_id else None,
+                resolver="gofile" if file_id else None,
             )
         )
 
-    def walk(data: dict) -> None:
+    def walk(data: dict, folder_id: str) -> None:
         if data.get("type") == "file":
             add_file(data)
             return
-        children = data.get("children") or {}
-        if not isinstance(children, dict):
-            return
-        for child in children.values():
-            if not isinstance(child, dict):
-                continue
-            if child.get("type") == "file":
-                add_file(child)
-                continue
-            if child.get("type") == "folder":
-                child_id = str(child.get("id") or child.get("code") or "")
-                if not child_id or child_id in seen_folders:
+        seen_children = set()
+        for page in range(1, 10001):
+            children = data.get("children") or {}
+            if not isinstance(children, dict):
+                break
+            fresh = 0
+            for key, child in children.items():
+                if key in seen_children or not isinstance(child, dict):
                     continue
-                seen_folders.add(child_id)
-                nested = fetch_with_password(child_id)
-                if nested.get("status") == "ok" and isinstance(nested.get("data"), dict):
-                    walk(nested["data"])
+                seen_children.add(key)
+                fresh += 1
+                if child.get("type") == "file":
+                    add_file(child)
+                elif child.get("type") == "folder":
+                    child_id = str(child.get("id") or child.get("code") or "")
+                    if child_id and child_id not in seen_folders:
+                        seen_folders.add(child_id)
+                        nested = fetch_with_password(child_id)
+                        if nested.get("status") == "ok" and isinstance(nested.get("data"), dict):
+                            walk(nested["data"], child_id)
+            if not fresh or len(children) < 1000:
+                break
+            next_page = fetch_with_password(folder_id, page + 1)
+            if next_page.get("status") != "ok" or not isinstance(next_page.get("data"), dict):
+                break
+            data = next_page["data"]
 
-    walk(root_data)
+    walk(root_data, content_id)
     return items
 
 
@@ -968,6 +1114,10 @@ def refresh_media(media: ResolvedMedia, client: HttpClient) -> ResolvedMedia | N
         resolved = _resolve_filester(source, client)
     elif media.resolver == "turbo":
         resolved = _resolve_turbo(source, client)
+    elif media.resolver == "bunkr":
+        resolved = _resolve_bunkr(source, client)
+    elif media.resolver == "gofile":
+        resolved = _resolve_gofile(source, client)
     else:
         return media
     if not resolved:
@@ -977,6 +1127,9 @@ def refresh_media(media: ResolvedMedia, client: HttpClient) -> ResolvedMedia | N
     fresh.source_url = source
     fresh.resolver = media.resolver
     fresh.force_unique = media.force_unique
+    fresh.origin_url = media.origin_url
+    fresh.post_label = media.post_label
+    fresh.thumbnail_url = media.thumbnail_url or fresh.thumbnail_url
     return fresh
 
 
@@ -1091,7 +1244,8 @@ def _resolve_goodbox(url: str, client: HttpClient) -> list[ResolvedMedia]:
                 pass
         if not reachable and fallback:
             src = fallback
-    return [ResolvedMedia(url=src, filename=filename_from_url(src))]
+    warning = "Goonbox: original indisponível; este arquivo é uma miniatura, com resolução reduzida." if src == fallback else None
+    return [ResolvedMedia(url=src, filename=filename_from_url(src), warning=warning)]
 
 
 def _resolve_coomer(url: str, client: HttpClient) -> list[ResolvedMedia]:
@@ -1248,7 +1402,7 @@ def requests_exceptions():  # noqa: ANN201
 RESOLVERS: list[tuple[str, object]] = [
     (r"nitter\.[^/]+/pic/", _resolve_nitter),
     (r"imagevenue\.com", _resolve_imagevenue),
-    (r"(cdn|i|stream)\d*\.bunkr|bunkrr?\.|bunkrrr\.org|bunkr-cache\.se|apidl\.bunkr\.ru|get\.bunkrr\.su|bunkr\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|red|ru|se|si|site|pk|ph|ps|sk|ws)", _resolve_bunkr),
+    (r"(cdn|i|stream)\d*\.bunkr|bunkrr?\.|bunkrrr\.org|bunkr-cache\.se|apidl\.bunkr\.ru|get\.bunkrr\.su|bunkr\.(ac|ax|black|cat|ci|cr|fi|is|media|nu|red|ru|se|si|site|pk|ph|ps|sk|ws)", _queue_bunkr),
     (r"cyberdrop\.[a-z]{2,}|fs-\d+\.cyberdrop|cyberfile\.(su|me)", _resolve_cyberdrop),
     (r"(?:pixeldrain\.(?:com|net)|pixeldra\.in)/[lu]/", _resolve_pixeldrain),
     (r"erome\.com/a/", _resolve_erome),

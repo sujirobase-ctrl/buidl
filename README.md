@@ -1,6 +1,6 @@
 # BUIDL — GUI e CLI
 
-## Prévia visual e download seletivo (v1.3.0)
+## BUIDL 2.0.0 — GUI e CLI
 
 Abra `buidl-gui.exe` (ou execute `python gui.py`), informe a URL da thread,
 os cookies quando necessários e a pasta de destino.
@@ -20,7 +20,7 @@ os cookies quando necessários e a pasta de destino.
 
 As miniaturas são carregadas sob demanda, somente em memória, com limite de 4 MiB
 por imagem. Em **Vídeos**, clique em **Prévia do vídeo** para reproduzir um trecho
-de até 6 segundos, sem áudio, com pausa e repetição. A prévia tem resolução reduzida;
+de até 10 segundos, sem áudio, com pausa e repetição. A prévia tem resolução reduzida;
 não é um player do vídeo completo. O carregamento usa requisições por trechos,
 orçamento de 24 MiB e prazo de 20 segundos verificado entre operações (uma operação
 de rede/decodificação em andamento pode levar um pouco mais para terminar).
@@ -50,13 +50,55 @@ O APK é de teste/debug para Android 7+ em arm64 ou x86_64.
 ## Downloads prontos
 
 As versões publicadas ficam em [GitHub Releases](https://github.com/sujirobase-ctrl/buidl/releases).
-Cada release inclui o APK Android, `buidl-gui.exe`, CLI, modo batch, wheel Python,
-um ZIP portátil dos executáveis e arquivos SHA-256 para conferência.
+Cada release inclui somente o APK Android e o executável da GUI Windows.
 
 O workflow em `.github/workflows/build.yml` executa os testes offline e recria
 todos esses artefatos em runners limpos. Pushes e pull requests geram artefatos
 do Actions; uma tag `vX.Y.Z`, igual à versão do `pyproject.toml`, também publica
 a release automaticamente.
+
+### Atualização dos hosts desde a v1.3.0
+
+Esta revisão parte da tag `v1.3.0` (`077fe0d1f4b57a92b953eeede1e3304fd75756aa`).
+O resolver Bunkr acompanha o endpoint e as respostas criptografadas do
+ForumPostDownloader 3.23, mantendo suporte ao formato antigo e resolvendo
+novamente os links antigos de CDN que redirecionam para páginas HTML.
+
+Os executáveis Windows incluem Node.js para atualizar o cálculo de autenticação
+do GoFile sem exigir uma instalação separada no computador do usuário.
+Para gerar os executáveis com os arquivos `.spec`, instale Node.js 24 no ambiente
+de build. O empacotamento também inclui sua licença, obtida do repositório oficial
+na versão correspondente; a primeira compilação precisa de acesso à internet.
+O runtime aumenta o tamanho dos executáveis.
+Ao executar diretamente por Python, Node.js no PATH continua sendo opcional:
+sem ele, o GoFile usa o último salt conhecido e registra um aviso. Essa limitação
+também se aplica ao Android; esta revisão não adiciona um runtime JavaScript ao APK.
+
+Se o Goonbox só disponibilizar uma miniatura, o log mostra um aviso de qualidade.
+Bloqueios de Cloudflare ainda podem impedir o acesso ao original.
+
+### Downloads longos e recuperação da GUI
+
+Na revisão HTTPS, os arquivos auxiliares de política TLS exigidos pelo Python
+de build são incluídos nos três executáveis. O destino padrão da GUI é
+`~/Downloads/BUIDL`, independente do aplicativo que abriu o EXE, com validação
+de escrita antes de iniciar. O teste `tests/packaged_https_smoke.py` carrega
+o SSL e suas bibliotecas do próprio executável para verificar o empacotamento.
+
+A GUI salva a fila, as opções e a seleção confirmada nos dados locais do
+aplicativo (`%LOCALAPPDATA%/BUIDL/recovery`) e oferece continuar ao reabrir
+uma execução interrompida. O resultado de cada arquivo é gravado durante
+o download; arquivos parciais e partes de downloads paralelos são preservados.
+
+O Bunkr passa a assinar os links apenas no momento do download. GoFile renova
+os links e reutiliza a conta temporária. Atualizar o mesmo `cookies.txt`
+selecionado recarrega os cookies sem reiniciar a fila. Recusas de acesso
+repetidas interrompem o agendamento para evitar milhares de falsos erros.
+
+Há dois resolvers de análise em paralelo, agendamento limitado da fila e
+tentativas de rede sem multiplicação entre camadas. Testes reproduzíveis
+de 20 páginas, 12.800 arquivos e encerramento forçado da GUI estão descritos em
+[tests/LONG_SESSIONS_QA.md](tests/LONG_SESSIONS_QA.md).
 
 ## CLI
 
