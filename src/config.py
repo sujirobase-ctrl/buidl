@@ -72,7 +72,7 @@ LOG_COLORS = {
 
 PROGRESS_COLUMNS_SEPARATOR = "[grey58]•"
 
-VERSION = "1.3.0"
+VERSION = "1.5.0"
 
 
 def get_version_string() -> str:

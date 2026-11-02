@@ -2,7 +2,7 @@
 
 ## Atualização 1.3.0 — interface e acessibilidade
 
-Artefato: `dist-android-1.3.0/buidl-android-1.3.0-debug.apk` (38.951.058 bytes).
+Artefato: [buidl-android-1.3.0-debug.apk](../Arquivo-BUIDL/Distribuicoes/Android/dist-android-1.3.0/buidl-android-1.3.0-debug.apk) (38.951.058 bytes).
 Pacote: `com.sujirobase.buidl`, versão `1.3.0-mobile`, código 4.
 SHA-256: `fa0b679fb533f07aa7f954e615c5cc94da6d91bd733fdb0f9c602d474497d378`.
 
@@ -58,7 +58,7 @@ fabricantes/tamanhos de tela ou todos os hosts. APK de instalação manual/debug
 
 ## Atualização 1.2.0 — escolha da pasta de destino
 
-Artefato: `dist-android-1.2.0/buidl-android-1.2.0-debug.apk` (38.878.369 bytes).
+Artefato: [buidl-android-1.2.0-debug.apk](../Arquivo-BUIDL/Distribuicoes/Android/dist-android-1.2.0/buidl-android-1.2.0-debug.apk) (38.878.369 bytes).
 Pacote: `com.sujirobase.buidl`, versão `1.2.0-mobile`, código 3.
 SHA-256: `f6225c73f2c44d3721268f166e0234fb7277509ed92771155d2248cbf03da1e5`.
 
@@ -98,7 +98,7 @@ simulados nos testes Python. É necessário espaço temporário no aparelho.
 
 ## Atualização 1.1.0 — captura de cookies
 
-Artefato: `dist-android-1.1.0/buidl-android-1.1.0-debug.apk` (39.015.185 bytes).
+Artefato: [buidl-android-1.1.0-debug.apk](../Arquivo-BUIDL/Distribuicoes/Android/dist-android-1.1.0/buidl-android-1.1.0-debug.apk) (39.015.185 bytes).
 Pacote: `com.sujirobase.buidl`, versão `1.1.0-mobile`, código 2.
 SHA-256: `c3d760e5ce83a8c855e5be5e6564cad25451438e81aebe895ea48d1aa838d46d`.
 
@@ -139,7 +139,7 @@ mesmo com o mesmo User-Agent. Não há promessa de contornar bloqueios dos hosts
 
 ## Histórico: versão 1.0.0
 
-Artefato: `dist-android-1.0.0/buidl-android-1.0.0-debug.apk` (38.979.304 bytes).
+Artefato: [buidl-android-1.0.0-debug.apk](../Arquivo-BUIDL/Distribuicoes/Android/dist-android-1.0.0/buidl-android-1.0.0-debug.apk) (38.979.304 bytes).
 Pacote: `com.sujirobase.buidl`, versão `1.0.0-mobile`, código 1.
 SHA-256: `912e370a951f1853cd107fa233cd374530622ede4a7867410424f3230ff76e01`.
 

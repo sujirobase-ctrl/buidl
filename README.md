@@ -1,7 +1,7 @@
 # BUIDL — Media Downloader
 
 Aplicativo para analisar e baixar imagens, vídeos, áudios e arquivos publicados em
-threads XenForo. O BUIDL possui interface gráfica para Windows, aplicativo Android,
+threads XenForo. O BUIDL possui interface gráfica Qt para Windows, aplicativo Android,
 CLI e modo batch, todos usando o mesmo núcleo Python de parsers e resolvers.
 
 O projeto foi adaptado a partir do
@@ -14,15 +14,15 @@ tratamento adicional para hosts que mudam seus links com frequência.
 
 ## Baixar
 
-A versão atual é a **v1.3.0**:
+A versão atual é a **v1.5.0**:
 
 | Plataforma | Arquivo | Indicação |
 | --- | --- | --- |
-| Windows | [`buidl-gui.exe`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.3.0/buidl-gui.exe) | Interface gráfica — recomendado |
-| Android | [`BUIDL-android.apk`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.3.0/BUIDL-android.apk) | Android 7+, arm64 ou x86_64 |
-| Windows | [`BUIDL-Windows-portable.zip`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.3.0/BUIDL-Windows-portable.zip) | GUI, CLI e batch juntos |
-| Windows | [`buidl-cli.exe`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.3.0/buidl-cli.exe) | Uma thread pela linha de comando |
-| Windows | [`buidl-batch.exe`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.3.0/buidl-batch.exe) | Várias URLs de `URLs.txt` |
+| Windows | [`buidl-gui.exe`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.5.0/buidl-gui.exe) | Interface gráfica inspirada no Parabolic — recomendado |
+| Android | [`BUIDL-android.apk`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.5.0/BUIDL-android.apk) | Interface nativa Android, Android 7+, arm64 ou x86_64 |
+| Windows | [`BUIDL-Windows-portable.zip`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.5.0/BUIDL-Windows-portable.zip) | GUI, CLI e batch juntos |
+| Windows | [`buidl-cli.exe`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.5.0/buidl-cli.exe) | Uma thread pela linha de comando |
+| Windows | [`buidl-batch.exe`](https://github.com/sujirobase-ctrl/buidl/releases/download/v1.5.0/buidl-batch.exe) | Várias URLs de `URLs.txt` |
 
 Veja todos os arquivos, notas e checksums em
 [`Releases`](https://github.com/sujirobase-ctrl/buidl/releases/latest). Os arquivos
@@ -45,16 +45,19 @@ Veja todos os arquivos, notas e checksums em
 
 ## Windows — interface gráfica
 
-1. Baixe e abra `buidl-gui.exe`.
+1. Baixe e abra `buidl-gui.exe` (interface Qt nativa para Windows).
 2. Cole a URL da thread.
 3. Informe um `cookies.txt` caso o fórum exija login.
 4. Escolha a pasta de destino e marque **Todas as páginas**, se necessário.
 5. Use **Visualizar e escolher** para selecionar arquivos ou **Iniciar download**
    para baixar toda a fila.
 
-Na galeria, a seleção começa vazia. É possível filtrar por imagens, vídeos,
-áudios ou outros arquivos, pesquisar por nome/post/host e marcar todos os
-resultados do filtro. A seleção, os filtros, a página atual e as miniaturas são
+Na galeria, a seleção começa vazia. Os botões sempre visíveis **Só fotos**,
+**Só vídeos**, **Áudios** e **Outros** filtram o conteúdo imediatamente. Também é
+possível pesquisar por nome/post/host e marcar todos os
+resultados do filtro. **Baixar resultados do filtro** baixa tudo que estiver
+visível pelo tipo e pela busca atuais, sem precisar marcar arquivo por arquivo.
+A seleção, os filtros, a página atual e as miniaturas são
 mantidos ao sair e voltar para a visualização durante a mesma sessão.
 
 A prévia de vídeo do Windows reproduz um trecho reduzido, sem áudio, de até seis
@@ -222,7 +225,7 @@ Pushes e pull requests geram artefatos temporários; uma tag `vX.Y.Z` que corres
 ## Estrutura do projeto
 
 ```text
-gui.py                         interface gráfica Windows
+gui_qt.py                      interface gráfica Windows em Qt 6
 downloader.py                  CLI para uma URL
 main.py                        CLI batch para URLs.txt
 src/

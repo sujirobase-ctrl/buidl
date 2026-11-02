@@ -26,6 +26,15 @@ build/
 !buidl.spec
 !buidl-batch.spec
 !buidl-gui.spec
+!buidl-engine.spec
+
+# Local .NET SDK and generated native Windows output
+windows-dotnet/.tools/
+windows-dotnet/**/bin/
+windows-dotnet/**/obj/
+windows-dotnet/build-engine/
+windows-dotnet/Buidl.WinUI/Engine/
+release-dotnet-*/
 
 # Test cache
 .pytest_cache/
@@ -36,3 +45,7 @@ Temp/
 _ref/
 CHATLOG.md
 URLs.txt
+
+# Entregas e arquivos historicos locais
+/Arquivo-BUIDL/
+/Correcoes/*/

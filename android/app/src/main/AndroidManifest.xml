@@ -9,7 +9,7 @@
         android:theme="@style/AppTheme" android:icon="@drawable/ic_buidl"
         android:allowBackup="false" android:usesCleartextTraffic="true"
         android:supportsRtl="true">
-        <activity android:name=".MainActivity" android:exported="true"
+        <activity android:name=".ComposeActivity" android:exported="true"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

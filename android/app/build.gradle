@@ -1,6 +1,8 @@
 plugins {
     id 'com.android.application'
     id 'com.chaquo.python'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
 }
 
 android {
@@ -11,8 +13,8 @@ android {
         applicationId 'com.sujirobase.buidl'
         minSdk 24
         targetSdk 35
-        versionCode 4
-        versionName '1.3.0-mobile'
+        versionCode 9
+        versionName '1.5.2-mobile'
         ndk { abiFilters 'arm64-v8a', 'x86_64' }
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
@@ -20,7 +22,11 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-    buildFeatures { buildConfig true }
+    kotlinOptions { jvmTarget = '17' }
+    buildFeatures {
+        buildConfig true
+        compose true
+    }
     buildTypes {
         qa {
             initWith debug
@@ -62,6 +68,19 @@ tasks.configureEach {
 }
 dependencies {
     implementation 'androidx.core:core:1.16.0'
+    // Stable Compose generation compatible with AGP 8.13 / compileSdk 36.
+    // Newer 1.12 artifacts require AGP 9.1 and API 37, which Chaquopy does not yet target here.
+    def composeBom = platform('androidx.compose:compose-bom:2025.10.01')
+    implementation composeBom
+    androidTestImplementation composeBom
+    implementation 'androidx.activity:activity-compose:1.11.0'
+    implementation 'androidx.compose.material3:material3'
+    implementation 'androidx.compose.material3.adaptive:adaptive:1.1.0'
+    implementation 'androidx.compose.material:material-icons-extended'
+    implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.9.4'
+    debugImplementation 'androidx.compose.ui:ui-tooling'
+    androidTestImplementation 'androidx.compose.ui:ui-test-junit4'
+    debugImplementation 'androidx.compose.ui:ui-test-manifest'
     androidTestImplementation 'androidx.test:runner:1.6.2'
     androidTestImplementation 'androidx.test:core:1.6.1'
     androidTestImplementation 'androidx.test.ext:junit:1.2.1'

@@ -1,4 +1,4 @@
-# BUIDL Android — 1.3.0-mobile
+# BUIDL Android — 1.5.2-mobile
 
 Aplicativo Android nativo (Java) com o downloader Python do projeto embutido via
 [Chaquopy](https://chaquo.com/chaquopy/doc/current/android.html). Não depende do PC
@@ -8,9 +8,9 @@ Windows não foi incluída nem alterada.
 ## Uso
 
 1. Instale o APK e abra **BUIDL**.
-2. Em **Baixar → Escolher pasta de destino**, escolha ou crie a pasta e confirme
-   **Usar esta pasta → Permitir**. A escolha é lembrada após fechar o app. Você
-   também pode manter **Usar pasta do aplicativo**.
+2. Ao tocar em **Baixar tudo**, **Baixar filtro** ou **Selecionados**, escolha ou
+   crie a pasta e confirme **Usar esta pasta → Permitir**. O seletor é aberto em
+   toda nova tentativa de download; não há destino interno silencioso.
 3. Em **Baixar → Capturar cookies**, faça login no SimpCity dentro do aplicativo
    e toque em **Pronto**, no canto superior direito. Cole a URL da thread em
    **Baixar**. A importação de `cookies.txt` Netscape continua disponível.
@@ -18,12 +18,12 @@ Windows não foi incluída nem alterada.
    **Baixar selecionados**. Com fonte normal em retrato, o botão permanece fixo.
    Com fonte ampliada/tela baixa, ele fica no início da área rolável; em telas
    largas, no painel lateral de atividade.
-5. **Buscar e filtrar** expande a busca e o tipo de arquivo. **Opções**, na galeria, permite marcar/desmarcar o filtro, baixar todos ou
+5. **Buscar e filtrar** expande a busca e o tipo de arquivo. **Baixar resultados
+   do filtro** baixa imediatamente tudo que corresponde à busca e ao tipo atuais.
+   **Opções**, na galeria, permite marcar/desmarcar o filtro, baixar todos ou
    atualizar a thread. Trocar de aba não repete a análise.
-6. Em **Arquivos**, abra os downloads do destino atual. Quando o destino é a pasta
-   do app, também pode usar **Exportar arquivos para uma pasta**.
-   A exportação cria cópias; os originais são mantidos. Se um nome já existir, o
-   provedor de arquivos pode criar outro nome para evitar a substituição.
+6. Em **Arquivos**, abra os downloads do último destino usado. Se um nome já
+   existir, o provedor de arquivos pode criar outro nome para evitar a substituição.
 
 O app inclui busca, filtros por tipo, paginação, miniaturas, prévia de vídeo sem
 áudio, seleção preservada durante a sessão, retomada de arquivos, notificações,
@@ -54,8 +54,8 @@ progresso e detalhes de falhas. Os resolvers são os mesmos de `../src`.
 
 ### Pasta de destino
 
-- Os arquivos são salvos automaticamente na pasta selecionada, organizados por
-  thread e categoria. Não é necessário exportar depois de cada download.
+- Os arquivos são salvos na pasta escolhida para aquela tentativa, organizados
+  por thread e categoria. O app sempre pergunta o destino antes de baixar.
 - A gravação usa o Storage Access Framework: o app acessa somente a árvore
   autorizada pelo seletor Android, sem pedir acesso geral ao armazenamento.
 - Cada arquivo baixa para um temporário no app, para manter a retomada, e depois
@@ -68,8 +68,10 @@ progresso e detalhes de falhas. Os resolvers são os mesmos de `../src`.
   reiniciar o app, sem baixar novamente o conteúdo já recebido.
 - Arquivos existentes não são substituídos: se houver conflito de nome, o novo
   arquivo recebe um sufixo. Trocar o destino não move/apaga arquivos anteriores
-  nem repete a busca da galeria. Na aba Arquivos, aparece o histórico do destino
-  atual; para ver os anteriores, selecione a pasta usada antes.
+  nem repete a busca da galeria. A aba Arquivos mostra o último destino usado.
+- Depois de concluir cada imagem, vídeo ou áudio no armazenamento compartilhado,
+  o app solicita a indexação ao Android para o conteúdo aparecer nos aplicativos
+  de Fotos/Galeria compatíveis.
 - Se a permissão for revogada ou a pasta ficar inacessível, o download mostra
   falha e não muda silenciosamente para outra pasta. Escolha a pasta novamente.
 - O Android pode impedir selecionar a raiz do armazenamento ou Downloads.
@@ -101,19 +103,17 @@ progresso e detalhes de falhas. Os resolvers são os mesmos de `../src`.
   decidindo quando a sessão deixa de valer. Faça nova captura se necessário.
   A captura usa a API nativa
   [CookieManager.getCookie](https://developer.android.com/reference/android/webkit/CookieManager#getCookie(java.lang.String)).
-- Sem escolher outra pasta, os downloads ficam em
-  `Android/data/com.sujirobase.buidl/files/Download/<thread>`.
-- **Desinstalar o app ou limpar seus dados pode apagar os arquivos internos e os
-  downloads dessa pasta. Exporte o que quiser conservar antes disso.**
-- Arquivos concluídos em uma pasta externa escolhida permanecem nela ao
+- Não existe mais fallback de download em `Android/data`: escolher uma pasta pelo
+  seletor do Android é obrigatório antes de iniciar qualquer transferência.
+- Arquivos concluídos na pasta escolhida permanecem nela ao
   desinstalar. Porém, limpar dados/desinstalar remove permissões, temporários e
   o índice privado de retomada; após reinstalar, será necessário escolher a
   pasta novamente e arquivos antigos podem ser baixados com um novo sufixo.
 - Não há upload para um servidor do BUIDL, telemetria ou conta adicional.
 - Links HTTP antigos são aceitos por compatibilidade; prefira HTTPS.
 - A seleção e a análise ficam na memória enquanto o processo existir. Depois de
-  o Android encerrar o processo, analise a URL novamente: os arquivos e o estado
-  de retomada continuam na pasta do app.
+  o Android encerrar o processo, analise a URL novamente; os arquivos concluídos
+  permanecem na pasta escolhida.
 
 ### Limitações
 

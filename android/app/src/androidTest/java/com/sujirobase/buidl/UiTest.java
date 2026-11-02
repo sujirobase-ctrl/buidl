@@ -105,7 +105,7 @@ public class UiTest {
                             View root=a.getWindow().getDecorView();View toggle=find(root,"Buscar e filtrar");if(toggle!=null)toggle.performClick();
                         });
                         InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-                        scenario.onActivity(a -> {View root=a.getWindow().getDecorView();for(String key:new String[]{"busca_galeria","tipo_arquivo"})assertTrue(hasLabel(root,find(root,key).getId()));inspect(root,a.getResources().getDisplayMetrics().density);});
+                        scenario.onActivity(a -> {View root=a.getWindow().getDecorView();for(String key:new String[]{"busca_galeria","tipo_arquivo"})assertTrue(hasLabel(root,find(root,key).getId()));assertNotNull(find(root,"baixar_filtro"));inspect(root,a.getResources().getDisplayMetrics().density);});
                         scenario.onActivity(a -> {View toggle=find(a.getWindow().getDecorView(),"Ocultar busca e filtros");if(toggle!=null)toggle.performClick();});
                     }
                     scenario.recreate();

@@ -53,7 +53,7 @@ public class MainActivity extends Activity {
     private EditText url, include, ignore, search;
     private CheckBox allPages, separatePosts;
     private Spinner workers;
-    private Button scanButton, allButton, pauseButton, stopButton, selectionButton;
+    private Button scanButton, allButton, pauseButton, stopButton, selectionButton, filterDownloadButton;
     private LinearLayout galleryList;
     private int tab = 0, shownQueue = -1, galleryGeneration = 0;
     private long lastUiError = 0;
@@ -240,7 +240,7 @@ public class MainActivity extends Activity {
         advanced.addView(toggle);advanced.addView(options);content.addView(advanced);
         formControls.add(url);formControls.add(allPages);formControls.add(separatePosts);formControls.add(workers);formControls.add(include);formControls.add(ignore);
         content.addView(button("Ver falhas e atividade",false,this::showLogs));
-        content.addView(text("BUIDL · 1.3.0\nNa pasta do app, exporte antes de desinstalar. Uma pasta externa precisa de espaço temporário durante o download.",14,MUTED));
+        content.addView(text("BUIDL · 1.5.1\nNa pasta do app, exporte antes de desinstalar. Uma pasta externa precisa de espaço temporário durante o download.",14,MUTED));
     }
 
     private void saveForm() {
@@ -273,6 +273,11 @@ public class MainActivity extends Activity {
         startServiceAction(new Intent(this,DownloadService.class).setAction("download").putExtra("queue",model.snapshot.optInt("queue_id"))
                 .putExtra("indices",all ? "null" : ids.toString()));
     }
+    private void downloadFiltered() {
+        List<Integer> matches=filtered();
+        if(matches.isEmpty()) { message("Nenhum arquivo corresponde ao filtro."); return; }
+        model.selected.clear(); model.selected.addAll(matches); download(false);
+    }
 
     private void updateStatus() {
         JSONObject s=model.snapshot; boolean busy=s.optBoolean("busy") || model.pending;
@@ -301,6 +306,7 @@ public class MainActivity extends Activity {
         setText(pauseButton,state.equals("paused") ? "Continuar fila" : "Pausar fila"); stopButton.setEnabled(busy);
         if(scanButton!=null) { scanButton.setEnabled(!busy && model.engine!=null); allButton.setEnabled(!busy && model.engine!=null); }
         if(selectionButton!=null) selectionButton.setEnabled(!busy && !model.selected.isEmpty());
+        if(filterDownloadButton!=null) filterDownloadButton.setEnabled(!busy && !filtered().isEmpty());
         for(View v:formControls) v.setEnabled(!busy && model.engine!=null);
         if(cookieLabel!=null) {setText(cookieLabel,s.optBoolean("cookies") ? "Sessão salva · apenas neste aplicativo" : "Sem sessão salva. Opcional em threads públicas.");cookieLabel.setTextColor(s.optBoolean("cookies") ? ui.success : MUTED);}
         if(destinationLabel!=null) setText(destinationLabel,s.optString("destination_label","Pasta do aplicativo"));
@@ -326,6 +332,7 @@ public class MainActivity extends Activity {
         Spinner type=new Spinner(this); String[] kinds={"Todos","Imagens","Vídeos","Áudios","Arquivos"};
         Ui.key(type,"tipo_arquivo");ui.spinner(type,kinds);
         type.setSelection(Math.max(0,java.util.Arrays.asList(kinds).indexOf(model.kind)));filters.addView(ui.label("Tipo de arquivo",type));filters.addView(type);
+        filterDownloadButton=button("Baixar resultados do filtro",true,this::downloadFiltered);Ui.key(filterDownloadButton,"baixar_filtro");filters.addView(filterDownloadButton);
         boolean filtering=prefs.getBoolean("gallery_filters_expanded",false) || !model.query.isEmpty() || !model.kind.equals("Todos");
         filters.setVisibility(filtering ? View.VISIBLE : View.GONE);
         Button filterToggle=button(filtering ? "Ocultar busca e filtros" : "Buscar e filtrar",false,() -> {});
@@ -362,7 +369,10 @@ public class MainActivity extends Activity {
         } return result;
     }
     private void updateSelection() {
-        galleryCount.setText(model.selected.size()+" selecionados • "+filtered().size()+" resultados");
+        int filteredCount=filtered().size();
+        galleryCount.setText(model.selected.size()+" selecionados • "+filteredCount+" resultados");
+        filterDownloadButton.setText("Baixar resultados do filtro ("+filteredCount+")");
+        filterDownloadButton.setEnabled(filteredCount>0&&!model.snapshot.optBoolean("busy")&&!model.pending);
         selectionButton.setText("Baixar selecionados ("+model.selected.size()+")");
         selectionButton.setEnabled(!model.selected.isEmpty()&&!model.snapshot.optBoolean("busy")&&!model.pending);
     }
@@ -498,7 +508,7 @@ public class MainActivity extends Activity {
             try {
                 int grants=data.getFlags()&(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                 if(grants!=(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION))throw new SecurityException();
-                getContentResolver().takePersistableUriPermission(uri,grants);
+                getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
                 model.call("set_destination",unused -> {updateStatus();message("Pasta escolhida. Os próximos downloads serão salvos nela automaticamente.");},uri.toString());
             }catch(Exception e){message("Não foi possível obter permissão de escrita. Escolha outra pasta ou crie uma subpasta em Documentos/Downloads.");}
         } else if(request==PICK_COOKIES) {
@@ -511,7 +521,7 @@ public class MainActivity extends Activity {
                 }catch(Exception e){model.error(e);pending.delete();}
             });
         } else if(request==PICK_EXPORT) {
-            getContentResolver().takePersistableUriPermission(uri,data.getFlags()&(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION));
+            getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             TextView progress=text("Preparando exportação…",14,TEXT); progress.setPadding(dp(20),dp(20),dp(20),dp(20));
             AlertDialog dialog=new AlertDialog.Builder(this).setTitle("Exportar arquivos").setView(progress).setCancelable(false).create();dialog.show();
             model.io.execute(() -> { String outcome;
