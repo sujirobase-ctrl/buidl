@@ -39,7 +39,7 @@ public class DownloadService extends Service {
     }
 
     private Notification notification(String text) {
-        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, ComposeActivity.class), PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
         Intent stop = new Intent(this, DownloadService.class).setAction("cancel");
         PendingIntent cancel = PendingIntent.getService(this, 1, stop, PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder builder = android.os.Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL) : new Notification.Builder(this);

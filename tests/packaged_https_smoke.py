@@ -1,10 +1,13 @@
 """Create a verified TLS context using SSL code/native libraries from the EXE."""
 
 import sys
+import os
 from pathlib import Path
 
 
 def child(bundle):
+    os.environ["PATH"] = str(bundle) + os.pathsep + os.environ.get("PATH", "")
+    dll_handle = os.add_dll_directory(str(bundle)) if hasattr(os, "add_dll_directory") else None
     sys.path.insert(0, str(bundle))
     import ssl
     import _ssl
@@ -15,6 +18,8 @@ def child(bundle):
     context.load_verify_locations(cafile=str(bundle / 'certifi' / 'cacert.pem'))
     assert context.cert_store_stats()['x509_ca'] > 0
     print('PACKAGED HTTPS PASS: actual SSL runtime creates verified TLS context and loads certificates')
+    if dll_handle is not None:
+        dll_handle.close()
 
 
 def parent(executable):
@@ -28,8 +33,10 @@ def parent(executable):
         bundle = Path(directory)
         for name in archive.toc:
             normalized = name.replace('\\', '/')
-            if normalized in ('_ssl.pyd', 'libcrypto-3-x64.dll', 'libssl-3-x64.dll',
-                              'certifi/cacert.pem', 'codex-rejected-cas.pem'):
+            basename = Path(normalized).name.lower()
+            ssl_dll = basename.startswith(('libcrypto-', 'libssl-')) and basename.endswith('.dll')
+            if basename == '_ssl.pyd' or ssl_dll or normalized in (
+                    'certifi/cacert.pem', 'codex-rejected-cas.pem'):
                 target = bundle / normalized
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(archive.extract(name))

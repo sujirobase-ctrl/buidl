@@ -8,7 +8,7 @@ import threading
 import time
 import tempfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from tkinter import filedialog, messagebox
 from urllib.parse import urlparse
 
@@ -63,7 +63,8 @@ def validate_output_directory(value: str) -> Path:
 def recovery_output_directory(document) -> str:
     options = document["options"]
     saved = options.get("download_path") or options.get("custom_path") or ""
-    if not document.get("prepared") and "windowsapps" in {part.lower() for part in Path(saved).parts}:
+    saved_parts = {*Path(saved).parts, *PureWindowsPath(saved).parts}
+    if not document.get("prepared") and "windowsapps" in {part.lower() for part in saved_parts}:
         # Earlier builds inherited the launcher's protected working directory.
         # No prepared queue exists here, so no downloaded files are relocated.
         saved = str(default_download_directory())
